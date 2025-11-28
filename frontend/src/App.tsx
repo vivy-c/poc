@@ -1,0 +1,327 @@
+import { useEffect, useMemo, useState } from 'react';
+import './index.css';
+import {
+  AzureCommunicationTokenCredential,
+  CallComposite,
+  useAzureCommunicationCallAdapter,
+  type AzureCommunicationCallAdapterArgs,
+  type CallAdapter
+} from './acsClient';
+import { initDemoUser, startCall } from './api';
+import { DEMO_USERS, type DemoUser } from './demoUsers';
+import type { StartCallResponse } from './types';
+
+type CallBootstrapState = {
+  callSessionId: string;
+  acsGroupId: string;
+  acsToken: string;
+  acsIdentity: string;
+  displayName: string;
+};
+
+const LOCAL_STORAGE_KEY = 'call-demo-user';
+
+function App() {
+  const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
+  const [participantIds, setParticipantIds] = useState<string[]>([]);
+  const [callInfo, setCallInfo] = useState<CallBootstrapState | null>(null);
+  const [startInFlight, setStartInFlight] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const stored = localStorage.getItem(LOCAL_STORAGE_KEY);
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored) as { demoUserId?: string };
+        if (parsed.demoUserId) {
+          setSelectedUserId(parsed.demoUserId);
+        }
+      } catch {
+        localStorage.removeItem(LOCAL_STORAGE_KEY);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!selectedUserId) {
+      setParticipantIds([]);
+      localStorage.removeItem(LOCAL_STORAGE_KEY);
+      return;
+    }
+
+    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify({ demoUserId: selectedUserId }));
+    const defaultParticipants = DEMO_USERS.filter((user) => user.id !== selectedUserId)
+      .slice(0, 1)
+      .map((user) => user.id);
+    setParticipantIds(defaultParticipants);
+  }, [selectedUserId]);
+
+  const selectedUser = selectedUserId
+    ? DEMO_USERS.find((user) => user.id === selectedUserId) ?? null
+    : null;
+
+  const callAdapterArgs = useMemo<AzureCommunicationCallAdapterArgs | undefined>(() => {
+    if (!callInfo || !selectedUser) return undefined;
+    return {
+      userId: { communicationUserId: callInfo.acsIdentity },
+      displayName: selectedUser.displayName,
+      credential: new AzureCommunicationTokenCredential(callInfo.acsToken),
+      locator: { groupId: callInfo.acsGroupId }
+    };
+  }, [callInfo, selectedUser]);
+
+  const callAdapter = useAzureCommunicationCallAdapter(callAdapterArgs);
+
+  useEffect(() => {
+    return () => {
+      callAdapter?.dispose();
+    };
+  }, [callAdapter]);
+
+  const toggleParticipant = (demoUserId: string) => {
+    setParticipantIds((current) =>
+      current.includes(demoUserId)
+        ? current.filter((id) => id !== demoUserId)
+        : [...current, demoUserId]
+    );
+  };
+
+  const handleStartCall = async () => {
+    if (!selectedUser) return;
+    setError(null);
+    setStartInFlight(true);
+
+    try {
+      const initResponse = await initDemoUser(selectedUser.id);
+
+      const startResponse = await startCall({
+        demoUserId: selectedUser.id,
+        participantIds: participantIds.length ? participantIds : undefined
+      });
+
+      setCallInfo(transformCallStart(startResponse, selectedUser, initResponse.acsIdentity));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to start call.';
+      setError(message);
+    } finally {
+      setStartInFlight(false);
+    }
+  };
+
+  return (
+    <main className="min-h-screen bg-slate-950 text-slate-50">
+      <div className="mx-auto flex max-w-6xl flex-col gap-6 px-6 py-10">
+        <Header />
+        {!selectedUser ? (
+          <PersonaSelection onSelect={setSelectedUserId} />
+        ) : (
+          <CallWorkspace
+            selectedUser={selectedUser}
+            participantIds={participantIds}
+            onToggleParticipant={toggleParticipant}
+            onStartCall={handleStartCall}
+            callInfo={callInfo}
+            callAdapterReady={!!callAdapter}
+            error={error}
+            startInFlight={startInFlight}
+            onResetUser={() => setSelectedUserId(null)}
+            callAdapter={callAdapter}
+          />
+        )}
+      </div>
+    </main>
+  );
+}
+
+function PersonaSelection({ onSelect }: { onSelect: (demoUserId: string) => void }) {
+  return (
+    <section className="grid gap-4 rounded-2xl border border-slate-800 bg-slate-900/60 p-6 shadow-xl shadow-black/50 md:grid-cols-[1fr,1.5fr]">
+      <div>
+        <p className="text-xs uppercase tracking-[0.1em] text-cyan-300">Choose a demo user</p>
+        <h2 className="mt-2 text-2xl font-semibold">Log in as a persona</h2>
+        <p className="mt-2 max-w-xl text-slate-300">
+          No auth yet — just pick a persona and we will remember it in localStorage. You can swap
+          roles anytime.
+        </p>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        {DEMO_USERS.map((user) => (
+          <button
+            key={user.id}
+            className="rounded-xl border border-slate-800 bg-slate-950/40 p-4 text-left transition hover:border-cyan-400/70 hover:shadow-lg hover:shadow-cyan-500/15"
+            onClick={() => onSelect(user.id)}
+          >
+            <div className="flex items-center justify-between text-sm text-slate-400">
+              <span className="rounded-full bg-slate-800 px-3 py-1 text-xs uppercase tracking-[0.1em] text-slate-300">
+                {user.role}
+              </span>
+              <span className="text-xs uppercase tracking-[0.08em]">{user.id}</span>
+            </div>
+            <h3 className="mt-3 text-xl font-semibold">{user.displayName}</h3>
+            <p className="mt-1 text-slate-300">{user.focus}</p>
+            <span className="mt-3 inline-block text-sm font-semibold text-cyan-300">
+              Use this persona →
+            </span>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+type CallWorkspaceProps = {
+  selectedUser: DemoUser;
+  participantIds: string[];
+  onToggleParticipant: (demoUserId: string) => void;
+  onStartCall: () => void;
+  callInfo: CallBootstrapState | null;
+  callAdapterReady: boolean;
+  error: string | null;
+  startInFlight: boolean;
+  onResetUser: () => void;
+  callAdapter: CallAdapter | undefined;
+};
+
+function CallWorkspace({
+  selectedUser,
+  participantIds,
+  onToggleParticipant,
+  onStartCall,
+  callInfo,
+  callAdapterReady,
+  error,
+  startInFlight,
+  onResetUser,
+  callAdapter
+}: CallWorkspaceProps) {
+  const otherUsers = DEMO_USERS.filter((user) => user.id !== selectedUser.id);
+
+  return (
+    <section className="grid gap-4 lg:grid-cols-[320px,1fr]">
+      <div className="flex flex-col gap-3">
+        <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 shadow-lg shadow-black/40">
+          <div className="flex items-center justify-between gap-3">
+            <span className="rounded-full bg-slate-800 px-3 py-1 text-xs uppercase tracking-[0.1em] text-slate-300">
+              Signed in as
+            </span>
+            <button
+              className="text-sm text-slate-300 underline-offset-4 hover:underline"
+              onClick={onResetUser}
+            >
+              Switch persona
+            </button>
+          </div>
+          <h3 className="mt-2 text-xl font-semibold">{selectedUser.displayName}</h3>
+          <p className="text-slate-300">{selectedUser.role}</p>
+          <p className="text-sm text-slate-400">{selectedUser.focus}</p>
+        </div>
+
+        <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 shadow-lg shadow-black/40">
+          <div className="flex items-center justify-between">
+            <span className="rounded-full bg-slate-800 px-3 py-1 text-xs uppercase tracking-[0.1em] text-slate-300">
+              Participants
+            </span>
+            <span className="text-xs text-slate-400">Pick who to invite</span>
+          </div>
+          <div className="mt-3 space-y-2">
+            {otherUsers.map((user) => (
+              <label
+                key={user.id}
+                className="flex cursor-pointer items-start gap-3 rounded-lg border border-transparent px-2 py-1 hover:border-slate-700"
+              >
+                <input
+                  className="mt-1 h-4 w-4 accent-cyan-400"
+                  type="checkbox"
+                  checked={participantIds.includes(user.id)}
+                  onChange={() => onToggleParticipant(user.id)}
+                />
+                <div>
+                  <div className="font-semibold">{user.displayName}</div>
+                  <div className="text-sm text-slate-400">{user.role}</div>
+                </div>
+              </label>
+            ))}
+          </div>
+          <button
+            className="mt-3 w-full rounded-lg bg-gradient-to-r from-cyan-400 to-blue-400 px-4 py-2 font-semibold text-slate-950 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-70"
+            onClick={onStartCall}
+            disabled={startInFlight}
+          >
+            {startInFlight ? 'Starting...' : 'Start Call'}
+          </button>
+          {error ? <p className="mt-2 text-sm text-rose-300">{error}</p> : null}
+          {callInfo ? (
+            <div className="mt-3 space-y-2 text-sm text-slate-300">
+              <div>
+                <div className="text-xs uppercase tracking-[0.08em] text-slate-500">Call Session</div>
+                <code>{callInfo.callSessionId}</code>
+              </div>
+              <div>
+                <div className="text-xs uppercase tracking-[0.08em] text-slate-500">Group ID</div>
+                <code>{callInfo.acsGroupId}</code>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="min-h-[540px] rounded-2xl border border-slate-800 bg-slate-900/60 p-3 shadow-xl shadow-black/50">
+        {!callInfo ? (
+          <div className="flex h-full flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-slate-800 bg-slate-950/40 p-6 text-center">
+            <p className="text-xs uppercase tracking-[0.1em] text-cyan-300">Call UI</p>
+            <h3 className="text-xl font-semibold">Start a call to load the ACS CallComposite</h3>
+            <p className="max-w-xl text-sm text-slate-400">
+              We will initialize ACS identities for all selected participants and return a VoIP token
+              scoped to {selectedUser.displayName}.
+            </p>
+          </div>
+        ) : callAdapterReady ? (
+          <CallComposite adapter={callAdapter!} />
+        ) : (
+          <div className="flex h-full flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-slate-800 bg-slate-950/40 p-6 text-center">
+            <p className="text-xs uppercase tracking-[0.1em] text-cyan-300">Preparing adapter</p>
+            <h3 className="text-xl font-semibold">Loading ACS CallComposite...</h3>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function Header() {
+  return (
+    <header className="rounded-2xl border border-slate-800 bg-gradient-to-br from-slate-900/80 via-slate-900 to-slate-950 p-6 shadow-xl shadow-black/50">
+      <div className="flex flex-wrap items-center gap-3 text-sm text-slate-300">
+        <span className="rounded-full bg-slate-800 px-3 py-1 text-xs uppercase tracking-[0.1em]">
+          Phase 1
+        </span>
+        <span className="rounded-full bg-cyan-400/20 px-3 py-1 text-xs uppercase tracking-[0.1em] text-cyan-200">
+          Demo login & call bootstrap
+        </span>
+      </div>
+      <h1 className="mt-4 text-4xl font-bold leading-tight sm:text-5xl">
+        Call studio for <span className="text-cyan-300">persona-driven</span> ACS demos
+      </h1>
+      <p className="mt-3 max-w-3xl text-lg text-slate-300">
+        Pick a persona, invite other demo users, and launch the embedded ACS CallComposite with
+        tokens issued by the Functions backend.
+      </p>
+    </header>
+  );
+}
+
+function transformCallStart(
+  payload: StartCallResponse,
+  selectedUser: DemoUser,
+  fallbackAcsIdentity: string
+): CallBootstrapState {
+  return {
+    callSessionId: payload.callSessionId,
+    acsGroupId: payload.acsGroupId,
+    acsToken: payload.acsToken,
+    acsIdentity: payload.acsIdentity ?? fallbackAcsIdentity,
+    displayName: selectedUser.displayName
+  };
+}
+
+export default App;

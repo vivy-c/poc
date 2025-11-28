@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-slate-950 text-slate-50 min-h-screen;
+}
+
+code {
+  @apply bg-slate-900/60 rounded px-1.5 py-0.5 text-xs font-mono text-slate-200;
+}
