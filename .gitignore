@@ -1,0 +1,27 @@
+# Node / frontend
+node_modules/
+frontend/.eslintcache
+frontend/.vite
+frontend/dist
+frontend/coverage
+frontend/.env*
+
+# Vite/TypeScript
+*.tsbuildinfo
+
+# Azure Functions / .NET
+backend/bin/
+backend/obj/
+backend/**/local.settings.json
+backend/.funcignore
+backend/.vs/
+backend/.vscode/
+backend/.user
+backend/*.user
+backend/Properties/launchSettings.json
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
