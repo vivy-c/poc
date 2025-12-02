@@ -31,6 +31,18 @@ public class CallSessionStore
         return _sessions.TryGetValue(id, out var session) ? session : null;
     }
 
+    public CallSession? FindByAcsGroupId(string acsGroupId)
+    {
+        return _sessions.Values.FirstOrDefault(
+            s => string.Equals(s.AcsGroupId, acsGroupId, StringComparison.OrdinalIgnoreCase));
+    }
+
+    public CallSession? FindByCallConnectionId(string callConnectionId)
+    {
+        return _sessions.Values.FirstOrDefault(
+            s => string.Equals(s.CallConnectionId, callConnectionId, StringComparison.OrdinalIgnoreCase));
+    }
+
     public CallSession? AddParticipants(Guid callSessionId, IReadOnlyCollection<CallParticipant> participants)
     {
         if (!_sessions.TryGetValue(callSessionId, out var existing))
@@ -52,6 +64,40 @@ public class CallSessionStore
         }
 
         var updated = existing with { Participants = merged };
+        _sessions[callSessionId] = updated;
+        return updated;
+    }
+
+    public CallSession? SetCallConnection(Guid callSessionId, string callConnectionId)
+    {
+        return Update(callSessionId, existing => existing with { CallConnectionId = callConnectionId });
+    }
+
+    public CallSession? UpdateStatus(Guid callSessionId, string status, DateTime? endedAtUtc = null)
+    {
+        return Update(callSessionId, existing => existing with
+        {
+            Status = status,
+            EndedAtUtc = endedAtUtc ?? existing.EndedAtUtc
+        });
+    }
+
+    public CallSession? MarkTranscriptionStarted(Guid callSessionId)
+    {
+        return Update(callSessionId, existing => existing with
+        {
+            TranscriptionStartedAtUtc = existing.TranscriptionStartedAtUtc ?? DateTime.UtcNow
+        });
+    }
+
+    private CallSession? Update(Guid callSessionId, Func<CallSession, CallSession> updater)
+    {
+        if (!_sessions.TryGetValue(callSessionId, out var existing))
+        {
+            return null;
+        }
+
+        var updated = updater(existing);
         _sessions[callSessionId] = updated;
         return updated;
     }

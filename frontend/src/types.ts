@@ -25,3 +25,27 @@ export type AddParticipantsResponse = {
   participants?: CallParticipant[];
   skipped?: Array<{ demoUserId: string; reason?: string }>;
 };
+
+export type TranscriptSegment = {
+  id: string;
+  callSessionId: string;
+  text: string;
+  speakerAcsIdentity?: string | null;
+  speakerDemoUserId?: string | null;
+  speakerDisplayName?: string | null;
+  offsetSeconds?: number | null;
+  durationSeconds?: number | null;
+  createdAtUtc: string;
+  source?: string | null;
+};
+
+export type TranscriptResponse = {
+  callSessionId: string;
+  status: string;
+  startedAtUtc: string;
+  endedAtUtc?: string | null;
+  transcriptionStartedAtUtc?: string | null;
+  acsGroupId: string;
+  callConnectionId?: string | null;
+  segments: TranscriptSegment[];
+};

@@ -7,4 +7,6 @@ public record CallSession(
     string StartedByDemoUserId,
     string Status,
     IReadOnlyList<CallParticipant> Participants,
-    string? CallConnectionId = null);
+    string? CallConnectionId = null,
+    DateTime? EndedAtUtc = null,
+    DateTime? TranscriptionStartedAtUtc = null);
