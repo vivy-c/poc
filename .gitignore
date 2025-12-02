@@ -25,3 +25,9 @@ backend/Properties/launchSettings.json
 Thumbs.db
 .vscode/
 .idea/
+
+# Ignore repo docs and solution per request
+agent.md
+plan.md
+README.md
+CallTranscription.sln
