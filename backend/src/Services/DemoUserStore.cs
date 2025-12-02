@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Linq;
 using CallTranscription.Functions.Models;
 
 namespace CallTranscription.Functions.Services;
@@ -12,7 +13,7 @@ public class DemoUserStore
         SeedDefaults();
     }
 
-    public IReadOnlyCollection<DemoUser> All => _demoUsers.Values;
+    public IReadOnlyCollection<DemoUser> All => _demoUsers.Values.ToList();
 
     public DemoUser? GetById(string demoUserId)
     {
