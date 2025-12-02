@@ -30,6 +30,7 @@ export type TranscriptSegment = {
   id: string;
   callSessionId: string;
   text: string;
+  speakerAcsIdentity?: string | null;
   speakerDemoUserId?: string | null;
   speakerDisplayName?: string | null;
   offsetSeconds?: number | null;

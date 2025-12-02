@@ -4,6 +4,7 @@ public record TranscriptSegment(
     Guid Id,
     Guid CallSessionId,
     string Text,
+    string? SpeakerAcsIdentity,
     string? SpeakerDemoUserId,
     string? SpeakerDisplayName,
     double? OffsetSeconds,

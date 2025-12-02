@@ -72,6 +72,7 @@ public class CallsTranscriptFunction
                 s.Id,
                 s.CallSessionId,
                 s.SpeakerDemoUserId,
+                s.SpeakerAcsIdentity,
                 s.SpeakerDisplayName,
                 s.Text,
                 s.OffsetSeconds,

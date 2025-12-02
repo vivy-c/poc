@@ -95,6 +95,7 @@ public class AcsEventsFunction
         var type = evt.EventType?.ToLowerInvariant() ?? string.Empty;
         var data = evt.Data;
         var callSessionId = ResolveCallSessionId(data);
+        var callSession = callSessionId is null ? null : _callSessionStore.Get(callSessionId.Value);
 
         if (callSessionId is null)
         {
@@ -141,7 +142,7 @@ public class AcsEventsFunction
 
         if (type.Contains("transcript") || type.Contains("transcription"))
         {
-            var segments = BuildSegments(callSessionId.Value, data).ToList();
+            var segments = BuildSegments(callSessionId.Value, callSession, data).ToList();
             if (segments.Count == 0)
             {
                 _logger.LogDebug("Transcript event contained no text for {CallSessionId}", callSessionId);
@@ -206,7 +207,7 @@ public class AcsEventsFunction
         return null;
     }
 
-    private IEnumerable<TranscriptSegment> BuildSegments(Guid callSessionId, AcsEventData? data)
+    private IEnumerable<TranscriptSegment> BuildSegments(Guid callSessionId, CallSession? callSession, AcsEventData? data)
     {
         if (data is null)
         {
@@ -223,7 +224,7 @@ public class AcsEventsFunction
                     continue;
                 }
 
-                yield return CreateSegment(callSessionId, segment, data, text);
+                yield return CreateSegment(callSessionId, callSession, segment, data, text);
             }
 
             yield break;
@@ -236,20 +237,49 @@ public class AcsEventsFunction
             yield break;
         }
 
-        yield return CreateSegment(callSessionId, payload, data, bodyText);
+        yield return CreateSegment(callSessionId, callSession, payload, data, bodyText);
     }
 
-    private TranscriptSegment CreateSegment(Guid callSessionId, AcsTranscriptionData? source, AcsEventData fallback, string text)
+    private TranscriptSegment CreateSegment(Guid callSessionId, CallSession? callSession, AcsTranscriptionData? source, AcsEventData fallback, string text)
     {
         var offset = source?.OffsetSeconds ?? source?.Offset ?? fallback.OffsetSeconds ?? fallback.Offset;
         var duration = source?.DurationSeconds ?? source?.Duration ?? fallback.DurationSeconds ?? fallback.Duration;
+        var speakerAcsId = source?.SpeakerId ?? fallback.SpeakerId ?? fallback.ParticipantId;
+        var speakerName = source?.SpeakerDisplayName ?? fallback.SpeakerDisplayName ?? fallback.ParticipantDisplayName;
+
+        string? speakerDemoUserId = null;
+        string? resolvedDisplayName = speakerName;
+
+        if (callSession?.Participants is not null && !string.IsNullOrWhiteSpace(speakerAcsId))
+        {
+            var byAcs = callSession.Participants.FirstOrDefault(
+                p => string.Equals(p.AcsIdentity, speakerAcsId, StringComparison.OrdinalIgnoreCase));
+            if (byAcs is not null)
+            {
+                speakerDemoUserId = byAcs.DemoUserId;
+                resolvedDisplayName = byAcs.DisplayName;
+            }
+        }
+
+        if (speakerDemoUserId is null && callSession?.Participants is not null && !string.IsNullOrWhiteSpace(speakerName))
+        {
+            var byName = callSession.Participants.FirstOrDefault(
+                p => string.Equals(p.DisplayName, speakerName, StringComparison.OrdinalIgnoreCase));
+            if (byName is not null)
+            {
+                speakerDemoUserId = byName.DemoUserId;
+                resolvedDisplayName = byName.DisplayName;
+                speakerAcsId ??= byName.AcsIdentity;
+            }
+        }
 
         return new TranscriptSegment(
             Guid.NewGuid(),
             callSessionId,
             text.Trim(),
-            source?.SpeakerId ?? fallback.SpeakerId ?? fallback.ParticipantId,
-            source?.SpeakerDisplayName ?? fallback.SpeakerDisplayName ?? fallback.ParticipantDisplayName,
+            speakerAcsId,
+            speakerDemoUserId,
+            resolvedDisplayName,
             offset,
             duration,
             DateTimeOffset.UtcNow,
