@@ -18,6 +18,7 @@ var host = new HostBuilder()
         services.AddSingleton<ResponseFactory>();
         services.AddSingleton<DemoUserStore>();
         services.AddSingleton<CallSessionStore>();
+        services.AddSingleton<TranscriptStore>();
         services.AddSingleton<AcsIdentityService>();
         services.AddSingleton<AcsCallService>();
         services.Configure<AcsOptions>(context.Configuration.GetSection("ACS"));
