@@ -6,4 +6,5 @@ public record CallSession(
     DateTime StartedAtUtc,
     string StartedByDemoUserId,
     string Status,
-    IReadOnlyList<CallParticipant> Participants);
+    IReadOnlyList<CallParticipant> Participants,
+    string? CallConnectionId = null);
