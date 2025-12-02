@@ -244,6 +244,7 @@ function CallWorkspace({
           </div>
           <button
             className="mt-3 w-full rounded-lg bg-gradient-to-r from-cyan-400 to-blue-400 px-4 py-2 font-semibold text-slate-950 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-70"
+            type="button"
             onClick={onStartCall}
             disabled={startInFlight}
           >

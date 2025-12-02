@@ -35,24 +35,36 @@ public class CallsStartFunction
 
     [Function("calls-start")]
     public async Task<HttpResponseData> RunAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "calls/start")] HttpRequestData req)
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", "options", Route = "calls/start")] HttpRequestData req)
     {
+        if (string.Equals(req.Method, "OPTIONS", StringComparison.OrdinalIgnoreCase))
+        {
+            var preflight = req.CreateResponse(HttpStatusCode.NoContent);
+            preflight.Headers.Add("Access-Control-Allow-Origin", "*");
+            preflight.Headers.Add("Access-Control-Allow-Methods", "POST,OPTIONS");
+            preflight.Headers.Add("Access-Control-Allow-Headers", "content-type");
+            return preflight;
+        }
         var request = await JsonSerializer.DeserializeAsync<StartCallRequest>(req.Body, JsonOptions);
         if (request is null || string.IsNullOrWhiteSpace(request.DemoUserId))
         {
-            return _responseFactory.CreateJson(
+            var bad = _responseFactory.CreateJson(
                 req,
                 HttpStatusCode.BadRequest,
                 new { error = "demoUserId is required." });
+            bad.Headers.Add("Access-Control-Allow-Origin", "*");
+            return bad;
         }
 
         var initiator = _demoUserStore.GetById(request.DemoUserId);
         if (initiator is null)
         {
-            return _responseFactory.CreateJson(
+            var notFound = _responseFactory.CreateJson(
                 req,
                 HttpStatusCode.NotFound,
                 new { error = $"Unknown demo user '{request.DemoUserId}'." });
+            notFound.Headers.Add("Access-Control-Allow-Origin", "*");
+            return notFound;
         }
 
         var participantIds = request.ParticipantIds?.Distinct(StringComparer.OrdinalIgnoreCase).Where(id => id != initiator.Id).ToList()
@@ -86,10 +98,12 @@ public class CallsStartFunction
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to provision ACS identity for call start by {DemoUserId}", request.DemoUserId);
-            return _responseFactory.CreateJson(
+            var errResp = _responseFactory.CreateJson(
                 req,
                 HttpStatusCode.InternalServerError,
                 new { error = "Unable to start call (identity provisioning failed)." });
+            errResp.Headers.Add("Access-Control-Allow-Origin", "*");
+            return errResp;
         }
 
         string acsToken;
@@ -104,10 +118,12 @@ public class CallsStartFunction
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to issue ACS token for {DemoUserId}", request.DemoUserId);
-            return _responseFactory.CreateJson(
+            var errResp = _responseFactory.CreateJson(
                 req,
                 HttpStatusCode.InternalServerError,
                 new { error = "Unable to issue ACS token." });
+            errResp.Headers.Add("Access-Control-Allow-Origin", "*");
+            return errResp;
         }
 
         var acsGroupId = Guid.NewGuid().ToString();
@@ -129,7 +145,9 @@ public class CallsStartFunction
             })
         };
 
-        return _responseFactory.CreateJson(req, HttpStatusCode.OK, payload);
+        var ok = _responseFactory.CreateJson(req, HttpStatusCode.OK, payload);
+        ok.Headers.Add("Access-Control-Allow-Origin", "*");
+        return ok;
     }
 
     private sealed record StartCallRequest(string DemoUserId, IEnumerable<string>? ParticipantIds);
