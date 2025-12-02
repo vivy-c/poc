@@ -7,9 +7,9 @@ import {
   type AzureCommunicationCallAdapterArgs,
   type CallAdapter
 } from './acsClient';
-import { initDemoUser, startCall } from './api';
+import { addParticipants, initDemoUser, startCall } from './api';
 import { DEMO_USERS, type DemoUser } from './demoUsers';
-import type { StartCallResponse } from './types';
+import type { CallParticipant, StartCallResponse } from './types';
 
 type CallBootstrapState = {
   callSessionId: string;
@@ -17,16 +17,21 @@ type CallBootstrapState = {
   acsToken: string;
   acsIdentity: string;
   displayName: string;
+  participants: CallParticipant[];
 };
 
 const LOCAL_STORAGE_KEY = 'call-demo-user';
 
 function App() {
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
-  const [participantIds, setParticipantIds] = useState<string[]>([]);
+  const [preCallParticipantIds, setPreCallParticipantIds] = useState<string[]>([]);
+  const [callParticipants, setCallParticipants] = useState<CallParticipant[]>([]);
+  const [inviteSelection, setInviteSelection] = useState<string[]>([]);
   const [callInfo, setCallInfo] = useState<CallBootstrapState | null>(null);
   const [startInFlight, setStartInFlight] = useState(false);
+  const [addInFlight, setAddInFlight] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [addError, setAddError] = useState<string | null>(null);
 
   useEffect(() => {
     const stored = localStorage.getItem(LOCAL_STORAGE_KEY);
@@ -44,7 +49,12 @@ function App() {
 
   useEffect(() => {
     if (!selectedUserId) {
-      setParticipantIds([]);
+      setPreCallParticipantIds([]);
+      setCallInfo(null);
+      setCallParticipants([]);
+      setInviteSelection([]);
+      setError(null);
+      setAddError(null);
       localStorage.removeItem(LOCAL_STORAGE_KEY);
       return;
     }
@@ -53,7 +63,12 @@ function App() {
     const defaultParticipants = DEMO_USERS.filter((user) => user.id !== selectedUserId)
       .slice(0, 1)
       .map((user) => user.id);
-    setParticipantIds(defaultParticipants);
+    setPreCallParticipantIds(defaultParticipants);
+    setCallInfo(null);
+    setCallParticipants([]);
+    setInviteSelection([]);
+    setError(null);
+    setAddError(null);
   }, [selectedUserId]);
 
   const selectedUser = selectedUserId
@@ -78,8 +93,16 @@ function App() {
     };
   }, [callAdapter]);
 
-  const toggleParticipant = (demoUserId: string) => {
-    setParticipantIds((current) =>
+  const togglePreCallParticipant = (demoUserId: string) => {
+    setPreCallParticipantIds((current) =>
+      current.includes(demoUserId)
+        ? current.filter((id) => id !== demoUserId)
+        : [...current, demoUserId]
+    );
+  };
+
+  const toggleInvitee = (demoUserId: string) => {
+    setInviteSelection((current) =>
       current.includes(demoUserId)
         ? current.filter((id) => id !== demoUserId)
         : [...current, demoUserId]
@@ -89,6 +112,7 @@ function App() {
   const handleStartCall = async () => {
     if (!selectedUser) return;
     setError(null);
+    setAddError(null);
     setStartInFlight(true);
 
     try {
@@ -96,15 +120,65 @@ function App() {
 
       const startResponse = await startCall({
         demoUserId: selectedUser.id,
-        participantIds: participantIds.length ? participantIds : undefined
+        participantIds: preCallParticipantIds.length ? preCallParticipantIds : undefined
       });
 
-      setCallInfo(transformCallStart(startResponse, selectedUser, initResponse.acsIdentity));
+      const bootstrap = transformCallStart(
+        startResponse,
+        selectedUser,
+        initResponse.acsIdentity
+      );
+      setCallInfo(bootstrap);
+      setCallParticipants(bootstrap.participants);
+      setInviteSelection([]);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to start call.';
       setError(message);
     } finally {
       setStartInFlight(false);
+    }
+  };
+
+  const handleAddParticipants = async () => {
+    if (!callInfo || inviteSelection.length === 0) return;
+    const idsToAdd = inviteSelection.filter(
+      (id) => !callParticipants.some((participant) => participant.demoUserId === id)
+    );
+    if (!idsToAdd.length) {
+      setInviteSelection([]);
+      return;
+    }
+
+    setAddError(null);
+    setAddInFlight(true);
+
+    try {
+      const response = await addParticipants(callInfo.callSessionId, idsToAdd);
+      if (response.participants?.length) {
+        setCallParticipants(response.participants);
+      } else if (response.added?.length) {
+        const existingIds = new Set(callParticipants.map((participant) => participant.demoUserId));
+        const merged = [...callParticipants];
+        response.added.forEach((participant) => {
+          if (!existingIds.has(participant.demoUserId)) {
+            merged.push({
+              id: participant.id,
+              demoUserId: participant.demoUserId,
+              displayName: participant.displayName,
+              acsIdentity: participant.acsIdentity
+            });
+            existingIds.add(participant.demoUserId);
+          }
+        });
+        setCallParticipants(merged);
+      }
+
+      setInviteSelection([]);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to add participants.';
+      setAddError(message);
+    } finally {
+      setAddInFlight(false);
     }
   };
 
@@ -117,13 +191,19 @@ function App() {
         ) : (
           <CallWorkspace
             selectedUser={selectedUser}
-            participantIds={participantIds}
-            onToggleParticipant={toggleParticipant}
+            preCallParticipantIds={preCallParticipantIds}
+            onTogglePreCallParticipant={togglePreCallParticipant}
             onStartCall={handleStartCall}
             callInfo={callInfo}
             callAdapterReady={!!callAdapter}
             error={error}
             startInFlight={startInFlight}
+            callParticipants={callParticipants}
+            inviteSelection={inviteSelection}
+            onToggleInvitee={toggleInvitee}
+            onAddParticipants={handleAddParticipants}
+            addInFlight={addInFlight}
+            addError={addError}
             onResetUser={() => setSelectedUserId(null)}
             callAdapter={callAdapter}
           />
@@ -171,30 +251,45 @@ function PersonaSelection({ onSelect }: { onSelect: (demoUserId: string) => void
 
 type CallWorkspaceProps = {
   selectedUser: DemoUser;
-  participantIds: string[];
-  onToggleParticipant: (demoUserId: string) => void;
+  preCallParticipantIds: string[];
+  onTogglePreCallParticipant: (demoUserId: string) => void;
   onStartCall: () => void;
   callInfo: CallBootstrapState | null;
+  callParticipants: CallParticipant[];
+  inviteSelection: string[];
+  onToggleInvitee: (demoUserId: string) => void;
+  onAddParticipants: () => void;
   callAdapterReady: boolean;
   error: string | null;
+  addError: string | null;
   startInFlight: boolean;
+  addInFlight: boolean;
   onResetUser: () => void;
   callAdapter: CallAdapter | undefined;
 };
 
 function CallWorkspace({
   selectedUser,
-  participantIds,
-  onToggleParticipant,
+  preCallParticipantIds,
+  onTogglePreCallParticipant,
   onStartCall,
   callInfo,
+  callParticipants,
+  inviteSelection,
+  onToggleInvitee,
+  onAddParticipants,
   callAdapterReady,
   error,
+  addError,
   startInFlight,
+  addInFlight,
   onResetUser,
   callAdapter
 }: CallWorkspaceProps) {
   const otherUsers = DEMO_USERS.filter((user) => user.id !== selectedUser.id);
+  const availableInvitees = otherUsers.filter(
+    (user) => !callParticipants.some((participant) => participant.demoUserId === user.id)
+  );
 
   return (
     <section className="grid gap-4 lg:grid-cols-[320px,1fr]">
@@ -221,36 +316,102 @@ function CallWorkspace({
             <span className="rounded-full bg-slate-800 px-3 py-1 text-xs uppercase tracking-[0.1em] text-slate-300">
               Participants
             </span>
-            <span className="text-xs text-slate-400">Pick who to invite</span>
+            <span className="text-xs text-slate-400">
+              {callInfo ? `${callParticipants.length} in call` : 'Pick who to invite'}
+            </span>
           </div>
-          <div className="mt-3 space-y-2">
-            {otherUsers.map((user) => (
-              <label
-                key={user.id}
-                className="flex cursor-pointer items-start gap-3 rounded-lg border border-transparent px-2 py-1 hover:border-slate-700"
-              >
-                <input
-                  className="mt-1 h-4 w-4 accent-cyan-400"
-                  type="checkbox"
-                  checked={participantIds.includes(user.id)}
-                  onChange={() => onToggleParticipant(user.id)}
-                />
-                <div>
-                  <div className="font-semibold">{user.displayName}</div>
-                  <div className="text-sm text-slate-400">{user.role}</div>
+          {callInfo ? (
+            <>
+              <div className="mt-3 space-y-2">
+                {callParticipants.map((participant) => (
+                  <div
+                    key={participant.id}
+                    className="flex items-center justify-between rounded-lg border border-slate-800/80 bg-slate-950/40 px-3 py-2"
+                  >
+                    <div>
+                      <div className="font-semibold">{participant.displayName}</div>
+                      <div className="text-xs text-slate-500">{participant.demoUserId}</div>
+                    </div>
+                    <span className="rounded-full bg-slate-800 px-2 py-1 text-[11px] uppercase tracking-[0.08em] text-slate-300">
+                      {participant.demoUserId === selectedUser.id ? 'You' : 'Invitee'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+
+              <div className="mt-4 border-t border-slate-800/70 pt-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-semibold">Invite more demo users</span>
+                  <span className="text-xs text-slate-400">Sends add-participant</span>
                 </div>
-              </label>
-            ))}
-          </div>
-          <button
-            className="mt-3 w-full rounded-lg bg-gradient-to-r from-cyan-400 to-blue-400 px-4 py-2 font-semibold text-slate-950 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-70"
-            type="button"
-            onClick={onStartCall}
-            disabled={startInFlight}
-          >
-            {startInFlight ? 'Starting...' : 'Start Call'}
-          </button>
-          {error ? <p className="mt-2 text-sm text-rose-300">{error}</p> : null}
+                {availableInvitees.length ? (
+                  <div className="mt-2 space-y-2">
+                    {availableInvitees.map((user) => (
+                      <label
+                        key={user.id}
+                        className="flex cursor-pointer items-start gap-3 rounded-lg border border-transparent px-2 py-1 hover:border-slate-700"
+                      >
+                        <input
+                          className="mt-1 h-4 w-4 accent-cyan-400"
+                          type="checkbox"
+                          checked={inviteSelection.includes(user.id)}
+                          onChange={() => onToggleInvitee(user.id)}
+                        />
+                        <div>
+                          <div className="font-semibold">{user.displayName}</div>
+                          <div className="text-sm text-slate-400">{user.role}</div>
+                        </div>
+                      </label>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-2 text-sm text-slate-400">
+                    All demo users are already part of this call.
+                  </p>
+                )}
+                <button
+                  className="mt-3 w-full rounded-lg bg-gradient-to-r from-cyan-400 to-blue-400 px-4 py-2 font-semibold text-slate-950 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-70"
+                  type="button"
+                  onClick={onAddParticipants}
+                  disabled={addInFlight || inviteSelection.length === 0}
+                >
+                  {addInFlight ? 'Adding...' : 'Add Participants'}
+                </button>
+                {addError ? <p className="mt-2 text-sm text-rose-300">{addError}</p> : null}
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="mt-3 space-y-2">
+                {otherUsers.map((user) => (
+                  <label
+                    key={user.id}
+                    className="flex cursor-pointer items-start gap-3 rounded-lg border border-transparent px-2 py-1 hover:border-slate-700"
+                  >
+                    <input
+                      className="mt-1 h-4 w-4 accent-cyan-400"
+                      type="checkbox"
+                      checked={preCallParticipantIds.includes(user.id)}
+                      onChange={() => onTogglePreCallParticipant(user.id)}
+                    />
+                    <div>
+                      <div className="font-semibold">{user.displayName}</div>
+                      <div className="text-sm text-slate-400">{user.role}</div>
+                    </div>
+                  </label>
+                ))}
+              </div>
+              <button
+                className="mt-3 w-full rounded-lg bg-gradient-to-r from-cyan-400 to-blue-400 px-4 py-2 font-semibold text-slate-950 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-70"
+                type="button"
+                onClick={onStartCall}
+                disabled={startInFlight}
+              >
+                {startInFlight ? 'Starting...' : 'Start Call'}
+              </button>
+              {error ? <p className="mt-2 text-sm text-rose-300">{error}</p> : null}
+            </>
+          )}
           {callInfo ? (
             <div className="mt-3 space-y-2 text-sm text-slate-300">
               <div>
@@ -321,8 +482,37 @@ function transformCallStart(
     acsGroupId: payload.acsGroupId,
     acsToken: payload.acsToken,
     acsIdentity: payload.acsIdentity ?? fallbackAcsIdentity,
-    displayName: selectedUser.displayName
+    displayName: selectedUser.displayName,
+    participants: normalizeParticipants(
+      payload.participants,
+      selectedUser,
+      payload.acsIdentity ?? fallbackAcsIdentity
+    )
   };
+}
+
+function normalizeParticipants(
+  participants: CallParticipant[] | undefined,
+  selectedUser: DemoUser,
+  selectedUserAcsIdentity: string
+): CallParticipant[] {
+  if (participants?.length) {
+    return participants;
+  }
+
+  const fallbackId =
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `${selectedUser.id}-${Date.now()}`;
+
+  return [
+    {
+      id: fallbackId,
+      demoUserId: selectedUser.id,
+      displayName: selectedUser.displayName,
+      acsIdentity: selectedUserAcsIdentity
+    }
+  ];
 }
 
 export default App;

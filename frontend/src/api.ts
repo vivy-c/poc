@@ -1,4 +1,4 @@
-import type { StartCallResponse } from './types';
+import type { AddParticipantsResponse, StartCallResponse } from './types';
 
 const apiBase = normalizeApiBase(import.meta.env.VITE_API_BASE_URL);
 
@@ -49,4 +49,10 @@ export async function initDemoUser(demoUserId: string) {
 
 export async function startCall(payload: { demoUserId: string; participantIds?: string[] }) {
   return postJson<StartCallResponse>('/calls/start', payload);
+}
+
+export async function addParticipants(callSessionId: string, participantIds: string[]) {
+  return postJson<AddParticipantsResponse>(`/calls/${callSessionId}/add-participant`, {
+    participantIds
+  });
 }
