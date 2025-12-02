@@ -1,9 +1,23 @@
 import type { StartCallResponse } from './types';
 
-const apiBase = '/api';
+const apiBase = normalizeApiBase(import.meta.env.VITE_API_BASE_URL);
+
+function normalizeApiBase(raw?: string) {
+  if (raw && raw.trim()) {
+    const trimmed = raw.trim().replace(/\/$/, '');
+    return trimmed.endsWith('/api') ? trimmed : `${trimmed}/api`;
+  }
+  const port = typeof window !== 'undefined' ? window.location.port : '';
+  if (port === '5173') {
+    return 'http://localhost:7071/api';
+  }
+  return '/api';
+}
+
+const buildUrl = (path: string) => `${apiBase}${path.startsWith('/') ? path : `/${path}`}`;
 
 async function postJson<TResponse>(path: string, payload: unknown): Promise<TResponse> {
-  const response = await fetch(`${apiBase}${path}`, {
+  const response = await fetch(buildUrl(path), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
