@@ -45,7 +45,27 @@ export type TranscriptResponse = {
   startedAtUtc: string;
   endedAtUtc?: string | null;
   transcriptionStartedAtUtc?: string | null;
+  startedByDemoUserId?: string | null;
   acsGroupId: string;
   callConnectionId?: string | null;
+  participants?: CallParticipant[];
   segments: TranscriptSegment[];
+};
+
+export type CallSummaryResponse = {
+  callSessionId: string;
+  status: string;
+  startedAtUtc: string;
+  endedAtUtc?: string | null;
+  transcriptionStartedAtUtc?: string | null;
+  startedByDemoUserId?: string | null;
+  acsGroupId: string;
+  callConnectionId?: string | null;
+  participants: CallParticipant[];
+  summaryStatus: 'ready' | 'pending' | 'failed';
+  summary?: string | null;
+  keyPoints: string[];
+  actionItems: string[];
+  summaryGeneratedAtUtc?: string | null;
+  summarySource?: string | null;
 };

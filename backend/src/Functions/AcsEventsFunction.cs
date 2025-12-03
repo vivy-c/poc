@@ -18,17 +18,20 @@ public class AcsEventsFunction
 
     private readonly CallSessionStore _callSessionStore;
     private readonly TranscriptStore _transcriptStore;
+    private readonly CallSummaryService _callSummaryService;
     private readonly ResponseFactory _responseFactory;
     private readonly ILogger _logger;
 
     public AcsEventsFunction(
         CallSessionStore callSessionStore,
         TranscriptStore transcriptStore,
+        CallSummaryService callSummaryService,
         ResponseFactory responseFactory,
         ILoggerFactory loggerFactory)
     {
         _callSessionStore = callSessionStore;
         _transcriptStore = transcriptStore;
+        _callSummaryService = callSummaryService;
         _responseFactory = responseFactory;
         _logger = loggerFactory.CreateLogger<AcsEventsFunction>();
     }
@@ -76,7 +79,7 @@ public class AcsEventsFunction
                 return validation;
             }
 
-            await DispatchEventAsync(evt);
+            await DispatchEventAsync(evt, req.FunctionContext.CancellationToken);
         }
 
         var ok = _responseFactory.CreateJson(
@@ -90,7 +93,7 @@ public class AcsEventsFunction
         return ok;
     }
 
-    private async Task DispatchEventAsync(IncomingEvent evt)
+    private async Task DispatchEventAsync(IncomingEvent evt, CancellationToken cancellationToken)
     {
         var type = evt.EventType?.ToLowerInvariant() ?? string.Empty;
         var data = evt.Data;
@@ -137,6 +140,7 @@ public class AcsEventsFunction
         {
             _callSessionStore.UpdateStatus(callSessionId.Value, "Completed", DateTime.UtcNow);
             _logger.LogInformation("Call {CallSessionId} marked completed from ACS event", callSessionId);
+            _ = _callSummaryService.EnsureSummaryAsync(callSessionId.Value, CancellationToken.None);
             return;
         }
 

@@ -19,9 +19,12 @@ var host = new HostBuilder()
         services.AddSingleton<DemoUserStore>();
         services.AddSingleton<CallSessionStore>();
         services.AddSingleton<TranscriptStore>();
+        services.AddSingleton<CallSummaryStore>();
         services.AddSingleton<AcsIdentityService>();
         services.AddSingleton<AcsCallService>();
         services.Configure<AcsOptions>(context.Configuration.GetSection("ACS"));
+        services.AddSingleton<CallSummaryService>();
+        services.Configure<OpenAiOptions>(context.Configuration.GetSection("OpenAI"));
     })
     .Build();
 

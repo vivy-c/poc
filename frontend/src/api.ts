@@ -1,4 +1,4 @@
-import type { AddParticipantsResponse, StartCallResponse } from './types';
+import type { AddParticipantsResponse, CallSummaryResponse, StartCallResponse } from './types';
 
 const apiBase = normalizeApiBase(import.meta.env.VITE_API_BASE_URL);
 
@@ -82,4 +82,8 @@ export async function addParticipants(callSessionId: string, participantIds: str
 
 export async function getTranscript(callSessionId: string) {
   return getJson(`/calls/${callSessionId}/transcript`);
+}
+
+export async function getSummary(callSessionId: string) {
+  return getJson<CallSummaryResponse>(`/calls/${callSessionId}/summary`);
 }
