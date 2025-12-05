@@ -6,6 +6,7 @@ using CallTranscription.Functions.Services;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace CallTranscription.Functions.Functions;
 
@@ -19,20 +20,26 @@ public class AcsEventsFunction
     private readonly CallSessionStore _callSessionStore;
     private readonly TranscriptStore _transcriptStore;
     private readonly CallSummaryService _callSummaryService;
+    private readonly AcsTranscriptionService _transcriptionService;
     private readonly ResponseFactory _responseFactory;
+    private readonly WebhookAuthOptions _webhookOptions;
     private readonly ILogger _logger;
 
     public AcsEventsFunction(
         CallSessionStore callSessionStore,
         TranscriptStore transcriptStore,
         CallSummaryService callSummaryService,
+        AcsTranscriptionService transcriptionService,
         ResponseFactory responseFactory,
+        IOptions<WebhookAuthOptions> webhookOptions,
         ILoggerFactory loggerFactory)
     {
         _callSessionStore = callSessionStore;
         _transcriptStore = transcriptStore;
         _callSummaryService = callSummaryService;
+        _transcriptionService = transcriptionService;
         _responseFactory = responseFactory;
+        _webhookOptions = webhookOptions.Value;
         _logger = loggerFactory.CreateLogger<AcsEventsFunction>();
     }
 
@@ -45,8 +52,19 @@ public class AcsEventsFunction
             var preflight = req.CreateResponse(HttpStatusCode.NoContent);
             preflight.Headers.Add("Access-Control-Allow-Origin", "*");
             preflight.Headers.Add("Access-Control-Allow-Methods", "POST,OPTIONS");
-            preflight.Headers.Add("Access-Control-Allow-Headers", "content-type");
+            preflight.Headers.Add("Access-Control-Allow-Headers", BuildAllowedHeaders());
             return preflight;
+        }
+
+        if (!IsAuthorized(req))
+        {
+            var unauthorized = _responseFactory.CreateJson(
+                req,
+                HttpStatusCode.Unauthorized,
+                new { error = "Unauthorized ACS webhook call." });
+            unauthorized.Headers.Add("Access-Control-Allow-Origin", "*");
+            unauthorized.Headers.Add("Access-Control-Allow-Headers", BuildAllowedHeaders());
+            return unauthorized;
         }
 
         List<IncomingEvent> events;
@@ -70,15 +88,13 @@ public class AcsEventsFunction
             return bad;
         }
 
+        if (TryCreateSubscriptionValidationResponse(req, events, out var validationResponse))
+        {
+            return validationResponse;
+        }
+
         foreach (var evt in events)
         {
-            if (HandleSubscriptionValidation(req, evt))
-            {
-                var validation = _responseFactory.CreateJson(req, HttpStatusCode.OK, new { validationResponse = evt.Data?.ValidationCode });
-                validation.Headers.Add("Access-Control-Allow-Origin", "*");
-                return validation;
-            }
-
             await DispatchEventAsync(evt, req.FunctionContext.CancellationToken);
         }
 
@@ -118,7 +134,12 @@ public class AcsEventsFunction
             }
 
             _callSessionStore.UpdateStatus(callSessionId.Value, "Connected");
-            _callSessionStore.MarkTranscriptionStarted(callSessionId.Value);
+
+            var latestSession = _callSessionStore.Get(callSessionId.Value);
+            if (latestSession is not null)
+            {
+                await _transcriptionService.TryStartAsync(latestSession, cancellationToken);
+            }
 
             _logger.LogInformation(
                 "Call {CallSessionId} connected; transcription pipeline started",
@@ -140,12 +161,22 @@ public class AcsEventsFunction
         {
             _callSessionStore.UpdateStatus(callSessionId.Value, "Completed", DateTime.UtcNow);
             _logger.LogInformation("Call {CallSessionId} marked completed from ACS event", callSessionId);
+            var latestSession = _callSessionStore.Get(callSessionId.Value);
+            if (latestSession is not null)
+            {
+                _ = _transcriptionService.TryStopAsync(latestSession, CancellationToken.None);
+            }
             _ = _callSummaryService.EnsureSummaryAsync(callSessionId.Value, CancellationToken.None);
             return;
         }
 
         if (type.Contains("transcript") || type.Contains("transcription"))
         {
+            if (callSession is not null)
+            {
+                _callSessionStore.MarkTranscriptionStarted(callSession.Id);
+            }
+
             var segments = BuildSegments(callSessionId.Value, callSession, data).ToList();
             if (segments.Count == 0)
             {
@@ -187,6 +218,15 @@ public class AcsEventsFunction
             if (byGroup is not null)
             {
                 return byGroup.Id;
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(data.GroupCallId))
+        {
+            var byGroupId = _callSessionStore.FindByAcsGroupId(data.GroupCallId);
+            if (byGroupId is not null)
+            {
+                return byGroupId.Id;
             }
         }
 
@@ -335,20 +375,80 @@ public class AcsEventsFunction
         return true;
     }
 
-    private bool HandleSubscriptionValidation(HttpRequestData req, IncomingEvent evt)
+    private string BuildAllowedHeaders()
     {
-        if (!string.Equals(evt.EventType, "Microsoft.EventGrid.SubscriptionValidationEvent", StringComparison.OrdinalIgnoreCase))
+        if (string.IsNullOrWhiteSpace(_webhookOptions.HeaderName))
         {
-            return false;
+            return "content-type";
         }
 
-        if (evt.Data?.ValidationCode is null)
+        return $"content-type,{_webhookOptions.HeaderName}";
+    }
+
+    private bool IsAuthorized(HttpRequestData req)
+    {
+        if (string.IsNullOrWhiteSpace(_webhookOptions.Key))
         {
-            return false;
+            return true;
         }
 
-        _logger.LogInformation("EventGrid subscription validation requested");
-        return true;
+        var headerName = string.IsNullOrWhiteSpace(_webhookOptions.HeaderName)
+            ? "x-acs-webhook-key"
+            : _webhookOptions.HeaderName;
+
+        if (req.Headers.TryGetValues(headerName, out var values)
+            && values.Any(v => string.Equals(v, _webhookOptions.Key, StringComparison.Ordinal)))
+        {
+            return true;
+        }
+
+        _logger.LogWarning("Unauthorized ACS webhook attempt rejected (header {HeaderName})", headerName);
+        return false;
+    }
+
+    private bool TryCreateSubscriptionValidationResponse(
+        HttpRequestData req,
+        IEnumerable<IncomingEvent> events,
+        out HttpResponseData response)
+    {
+        response = default!;
+
+        var headerEventType = TryGetHeader(req, "aeg-event-type");
+        if (string.Equals(headerEventType, "SubscriptionValidation", StringComparison.OrdinalIgnoreCase))
+        {
+            var validationCode = events.FirstOrDefault()?.Data?.ValidationCode;
+            response = BuildValidationResponse(req, validationCode);
+            _logger.LogInformation("EventGrid subscription validation requested via header.");
+            return true;
+        }
+
+        var validationEvent = events.FirstOrDefault(
+            e => string.Equals(e.EventType, "Microsoft.EventGrid.SubscriptionValidationEvent", StringComparison.OrdinalIgnoreCase));
+
+        if (validationEvent?.Data?.ValidationCode is not null)
+        {
+            response = BuildValidationResponse(req, validationEvent.Data.ValidationCode);
+            _logger.LogInformation("EventGrid subscription validation event received.");
+            return true;
+        }
+
+        response = default!;
+        return false;
+    }
+
+    private HttpResponseData BuildValidationResponse(HttpRequestData req, string? validationCode)
+    {
+        var validation = _responseFactory.CreateJson(req, HttpStatusCode.OK, new { validationResponse = validationCode });
+        validation.Headers.Add("Access-Control-Allow-Origin", "*");
+        validation.Headers.Add("Access-Control-Allow-Headers", BuildAllowedHeaders());
+        return validation;
+    }
+
+    private static string? TryGetHeader(HttpRequestData req, string headerName)
+    {
+        return req.Headers.TryGetValues(headerName, out var values)
+            ? values.FirstOrDefault()
+            : null;
     }
 
     private static bool TryGetString(JsonElement element, string propertyName, out string? value)

@@ -9,33 +9,37 @@ using Microsoft.Extensions.Logging;
 
 namespace CallTranscription.Functions.Functions;
 
-public class CallsStartFunction
+public class CallsJoinFunction
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     private readonly DemoUserStore _demoUserStore;
     private readonly CallSessionStore _callSessionStore;
     private readonly AcsIdentityService _acsIdentityService;
+    private readonly AcsCallService _acsCallService;
     private readonly ResponseFactory _responseFactory;
     private readonly ILogger _logger;
 
-    public CallsStartFunction(
+    public CallsJoinFunction(
         DemoUserStore demoUserStore,
         CallSessionStore callSessionStore,
         AcsIdentityService acsIdentityService,
+        AcsCallService acsCallService,
         ResponseFactory responseFactory,
         ILoggerFactory loggerFactory)
     {
         _demoUserStore = demoUserStore;
         _callSessionStore = callSessionStore;
         _acsIdentityService = acsIdentityService;
+        _acsCallService = acsCallService;
         _responseFactory = responseFactory;
-        _logger = loggerFactory.CreateLogger<CallsStartFunction>();
+        _logger = loggerFactory.CreateLogger<CallsJoinFunction>();
     }
 
-    [Function("calls-start")]
+    [Function("calls-join")]
     public async Task<HttpResponseData> RunAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "post", "options", Route = "calls/start")] HttpRequestData req)
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", "options", Route = "calls/{callSessionId}/join")] HttpRequestData req,
+        string callSessionId)
     {
         if (string.Equals(req.Method, "OPTIONS", StringComparison.OrdinalIgnoreCase))
         {
@@ -45,7 +49,18 @@ public class CallsStartFunction
             preflight.Headers.Add("Access-Control-Allow-Headers", "content-type");
             return preflight;
         }
-        var request = await JsonSerializer.DeserializeAsync<StartCallRequest>(req.Body, JsonOptions);
+
+        if (!Guid.TryParse(callSessionId, out var callSessionGuid))
+        {
+            var bad = _responseFactory.CreateJson(
+                req,
+                HttpStatusCode.BadRequest,
+                new { error = "Invalid call session id." });
+            bad.Headers.Add("Access-Control-Allow-Origin", "*");
+            return bad;
+        }
+
+        var request = await JsonSerializer.DeserializeAsync<JoinCallRequest>(req.Body, JsonOptions);
         if (request is null || string.IsNullOrWhiteSpace(request.DemoUserId))
         {
             var bad = _responseFactory.CreateJson(
@@ -56,8 +71,19 @@ public class CallsStartFunction
             return bad;
         }
 
-        var initiator = _demoUserStore.GetById(request.DemoUserId);
-        if (initiator is null)
+        var session = _callSessionStore.Get(callSessionGuid);
+        if (session is null)
+        {
+            var notFound = _responseFactory.CreateJson(
+                req,
+                HttpStatusCode.NotFound,
+                new { error = "Call session not found." });
+            notFound.Headers.Add("Access-Control-Allow-Origin", "*");
+            return notFound;
+        }
+
+        var demoUser = _demoUserStore.GetById(request.DemoUserId);
+        if (demoUser is null)
         {
             var notFound = _responseFactory.CreateJson(
                 req,
@@ -67,48 +93,25 @@ public class CallsStartFunction
             return notFound;
         }
 
-        var participantIds = request.ParticipantIds?.Distinct(StringComparer.OrdinalIgnoreCase).Where(id => id != initiator.Id).ToList()
-            ?? new List<string>();
-
-        var participants = new List<CallParticipant>();
         string acsIdentity;
-
         try
         {
-            acsIdentity = await _acsIdentityService.EnsureIdentityAsync(initiator, req.FunctionContext.CancellationToken);
-            _demoUserStore.AssignAcsIdentity(initiator.Id, acsIdentity);
-
-            participants.Add(new CallParticipant(Guid.NewGuid(), initiator.Id, initiator.DisplayName, acsIdentity));
-
-            foreach (var participantId in participantIds)
-            {
-                var participantUser = _demoUserStore.GetById(participantId);
-                if (participantUser is null)
-                {
-                    _logger.LogWarning("Requested participant {ParticipantId} not found", participantId);
-                    continue;
-                }
-
-                var participantIdentity = await _acsIdentityService.EnsureIdentityAsync(participantUser, req.FunctionContext.CancellationToken);
-                _demoUserStore.AssignAcsIdentity(participantUser.Id, participantIdentity);
-
-                participants.Add(new CallParticipant(Guid.NewGuid(), participantUser.Id, participantUser.DisplayName, participantIdentity));
-            }
+            acsIdentity = await _acsIdentityService.EnsureIdentityAsync(demoUser, req.FunctionContext.CancellationToken);
+            _demoUserStore.AssignAcsIdentity(demoUser.Id, acsIdentity);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to provision ACS identity for call start by {DemoUserId}", request.DemoUserId);
+            _logger.LogError(ex, "Failed to provision ACS identity for join request {DemoUserId}", request.DemoUserId);
             var errResp = _responseFactory.CreateJson(
                 req,
                 HttpStatusCode.InternalServerError,
-                new { error = "Unable to start call (identity provisioning failed)." });
+                new { error = "Unable to provision ACS identity." });
             errResp.Headers.Add("Access-Control-Allow-Origin", "*");
             return errResp;
         }
 
         string acsToken;
         DateTimeOffset tokenExpiresOn;
-
         try
         {
             var tokenResult = await _acsIdentityService.IssueVoipTokenAsync(acsIdentity, req.FunctionContext.CancellationToken);
@@ -117,7 +120,7 @@ public class CallsStartFunction
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to issue ACS token for {DemoUserId}", request.DemoUserId);
+            _logger.LogError(ex, "Failed to issue ACS token for join by {DemoUserId}", request.DemoUserId);
             var errResp = _responseFactory.CreateJson(
                 req,
                 HttpStatusCode.InternalServerError,
@@ -126,18 +129,34 @@ public class CallsStartFunction
             return errResp;
         }
 
-        var acsGroupId = Guid.NewGuid().ToString();
-        var callSession = _callSessionStore.Create(initiator.Id, acsGroupId, participants);
+        var participant = new CallParticipant(Guid.NewGuid(), demoUser.Id, demoUser.DisplayName, acsIdentity);
+
+        var updated = _callSessionStore.AddParticipants(callSessionGuid, new[] { participant });
+        if (updated is null)
+        {
+            var gone = _responseFactory.CreateJson(
+                req,
+                HttpStatusCode.NotFound,
+                new { error = "Call session not found." });
+            gone.Headers.Add("Access-Control-Allow-Origin", "*");
+            return gone;
+        }
+
+        _ = _acsCallService.TryAddParticipantAsync(
+            updated.Id,
+            updated.CallConnectionId,
+            participant,
+            req.FunctionContext.CancellationToken);
 
         var payload = new
         {
-            callSessionId = callSession.Id,
-            acsGroupId,
-            callConnectionId = callSession.CallConnectionId,
+            callSessionId = updated.Id,
+            acsGroupId = updated.AcsGroupId,
+            callConnectionId = updated.CallConnectionId,
             acsToken,
             acsTokenExpiresOn = tokenExpiresOn,
             acsIdentity,
-            participants = callSession.Participants.Select(p => new
+            participants = updated.Participants.Select(p => new
             {
                 p.Id,
                 p.DemoUserId,
@@ -151,5 +170,5 @@ public class CallsStartFunction
         return ok;
     }
 
-    private sealed record StartCallRequest(string DemoUserId, IEnumerable<string>? ParticipantIds);
+    private sealed record JoinCallRequest(string DemoUserId);
 }

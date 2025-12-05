@@ -1,41 +1,72 @@
-import type { ComponentType } from 'react';
-
-export type AzureCommunicationCallAdapterArgs = {
-  userId: { communicationUserId: string };
-  displayName: string;
-  credential: AzureCommunicationTokenCredential;
-  locator: { groupId: string };
-};
-
-export interface CallAdapter {
-  dispose(): void;
-}
-
-export class AzureCommunicationTokenCredential {
-  token: string;
-
-  constructor(token: string) {
-    this.token = token;
-  }
-}
+import { useEffect, useRef, useState } from 'react';
+import { AzureCommunicationTokenCredential } from '@azure/communication-common';
+import {
+  CallComposite,
+  createAzureCommunicationCallAdapter,
+  type AdapterError,
+  type AzureCommunicationCallAdapterArgs,
+  type CallAdapter
+} from '@azure/communication-react';
 
 export function useAzureCommunicationCallAdapter(
-  args: AzureCommunicationCallAdapterArgs | undefined
+  args: AzureCommunicationCallAdapterArgs | undefined,
+  onCreateError?: (error: Error) => void
 ): CallAdapter | undefined {
-  if (!args) return undefined;
-  // Placeholder adapter; in a full build, replace with the real ACS adapter.
-  return {
-    dispose() {
-      /* no-op */
+  const [adapter, setAdapter] = useState<CallAdapter>();
+  const adapterRef = useRef<CallAdapter>();
+  const onCreateErrorRef = useRef(onCreateError);
+  onCreateErrorRef.current = onCreateError;
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const disposeAdapter = () => {
+      adapterRef.current?.dispose();
+      adapterRef.current = undefined;
+      setAdapter(undefined);
+    };
+
+    if (!args) {
+      disposeAdapter();
+      return;
     }
-  };
+
+    const init = async () => {
+      try {
+        const newAdapter = await createAzureCommunicationCallAdapter(args);
+        if (cancelled) {
+          newAdapter.dispose();
+          return;
+        }
+        adapterRef.current?.dispose();
+        adapterRef.current = newAdapter;
+        setAdapter(newAdapter);
+      } catch (error) {
+        console.error('Failed to create ACS call adapter', error);
+        onCreateErrorRef.current?.(error as Error);
+        disposeAdapter();
+      }
+    };
+
+    init();
+
+    return () => {
+      cancelled = true;
+      disposeAdapter();
+    };
+  }, [
+    args?.userId?.communicationUserId,
+    args?.displayName,
+    args?.credential,
+    args?.locator
+  ]);
+
+  return adapter;
 }
 
-export const CallComposite: ComponentType<{ adapter: CallAdapter }> = () => (
-  <div className="flex h-full flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-slate-800 bg-slate-950/40 p-6 text-center text-slate-300">
-    <p className="text-xs uppercase tracking-[0.1em] text-cyan-300">Call UI placeholder</p>
-    <p className="text-sm">
-      ACS UI SDK is stubbed locally; wire the real ACS CallComposite when SDK packages are available.
-    </p>
-  </div>
-);
+export {
+  CallComposite,
+  AzureCommunicationTokenCredential
+};
+
+export type { AdapterError, AzureCommunicationCallAdapterArgs, CallAdapter };

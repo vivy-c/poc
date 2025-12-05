@@ -8,11 +8,14 @@ export type CallParticipant = {
 export type StartCallResponse = {
   callSessionId: string;
   acsGroupId: string;
+  callConnectionId?: string | null;
   acsToken: string;
   acsIdentity: string;
   acsTokenExpiresOn?: string;
   participants?: CallParticipant[];
 };
+
+export type JoinCallResponse = StartCallResponse;
 
 export type AddParticipantsResponse = {
   callSessionId: string;

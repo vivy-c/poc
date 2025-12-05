@@ -9,4 +9,7 @@ public record CallSession(
     IReadOnlyList<CallParticipant> Participants,
     string? CallConnectionId = null,
     DateTime? EndedAtUtc = null,
-    DateTime? TranscriptionStartedAtUtc = null);
+    DateTime? TranscriptionStartedAtUtc = null)
+{
+    public string OperationContext => Id.ToString();
+}

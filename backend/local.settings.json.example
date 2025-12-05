@@ -9,6 +9,7 @@
     "OpenAI__Endpoint": "<openai-endpoint>",
     "OpenAI__Key": "<openai-key>",
     "OpenAI__DeploymentName": "<openai-deployment>",
-    "Storage__ConnectionString": "<storage-connection>"
+    "Webhook__Key": "<optional-shared-secret>",
+    "Webhook__HeaderName": "x-acs-webhook-key"
   }
 }

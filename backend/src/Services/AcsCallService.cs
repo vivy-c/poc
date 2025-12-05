@@ -26,6 +26,7 @@ public class AcsCallService
     }
 
     public async Task<bool> TryAddParticipantAsync(
+        Guid callSessionId,
         string? callConnectionId,
         CallParticipantModel participant,
         CancellationToken cancellationToken = default)
@@ -33,8 +34,9 @@ public class AcsCallService
         if (string.IsNullOrWhiteSpace(callConnectionId))
         {
             _logger.LogWarning(
-                "Call connection id missing; skipping ACS participant add for {ParticipantId}",
-                participant.DemoUserId);
+                "Call connection id missing; skipping ACS participant add for {ParticipantId} (callSession={CallSessionId})",
+                participant.DemoUserId,
+                callSessionId);
             return false;
         }
 
@@ -43,7 +45,7 @@ public class AcsCallService
             var callConnection = _callAutomationClient.GetCallConnection(callConnectionId);
             var addOptions = new AddParticipantOptions(new CallInvite(new CommunicationUserIdentifier(participant.AcsIdentity)))
             {
-                OperationContext = participant.Id.ToString()
+                OperationContext = callSessionId.ToString()
             };
 
             await callConnection.AddParticipantAsync(addOptions, cancellationToken);

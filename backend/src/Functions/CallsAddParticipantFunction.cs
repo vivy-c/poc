@@ -134,7 +134,8 @@ public class CallsAddParticipantFunction
 
             var participant = new CallParticipant(Guid.NewGuid(), demoUser.Id, demoUser.DisplayName, acsIdentity);
             var acsInviteSent = await _acsCallService.TryAddParticipantAsync(
-                session.CallConnectionId ?? session.AcsGroupId,
+                session.Id,
+                session.CallConnectionId,
                 participant,
                 req.FunctionContext.CancellationToken);
 
@@ -167,6 +168,7 @@ public class CallsAddParticipantFunction
         {
             callSessionId = updated.Id,
             acsGroupId = updated.AcsGroupId,
+            callConnectionId = updated.CallConnectionId,
             added = added.Select(a => new
             {
                 a.Participant.Id,

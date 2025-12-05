@@ -4,10 +4,11 @@ import {
   AzureCommunicationTokenCredential,
   CallComposite,
   useAzureCommunicationCallAdapter,
+  type AdapterError,
   type AzureCommunicationCallAdapterArgs,
   type CallAdapter
 } from './acsClient';
-import { addParticipants, getSummary, getTranscript, initDemoUser, startCall } from './api';
+import { addParticipants, getSummary, getTranscript, initDemoUser, joinCall, startCall } from './api';
 import { DEMO_USERS, type DemoUser } from './demoUsers';
 import type {
   CallParticipant,
@@ -20,8 +21,10 @@ import type {
 type CallBootstrapState = {
   callSessionId: string;
   acsGroupId: string;
+  callConnectionId?: string | null;
   acsToken: string;
   acsIdentity: string;
+  acsTokenExpiresOn?: string;
   displayName: string;
   participants: CallParticipant[];
 };
@@ -41,12 +44,16 @@ function App() {
   const [addInFlight, setAddInFlight] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [addError, setAddError] = useState<string | null>(null);
+  const [adapterError, setAdapterError] = useState<string | null>(null);
   const [transcriptSegments, setTranscriptSegments] = useState<TranscriptSegment[]>([]);
   const [transcriptLoading, setTranscriptLoading] = useState(false);
   const [transcriptError, setTranscriptError] = useState<string | null>(null);
   const [callSummary, setCallSummary] = useState<CallSummaryResponse | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summaryError, setSummaryError] = useState<string | null>(null);
+  const [joinSessionId, setJoinSessionId] = useState('');
+  const [joinInFlight, setJoinInFlight] = useState(false);
+  const [joinError, setJoinError] = useState<string | null>(null);
 
   useEffect(() => {
     const stored = localStorage.getItem(LOCAL_STORAGE_KEY);
@@ -70,6 +77,7 @@ function App() {
       setInviteSelection([]);
       setError(null);
       setAddError(null);
+      setAdapterError(null);
       setTranscriptSegments([]);
       setTranscriptError(null);
       setTranscriptLoading(false);
@@ -77,6 +85,9 @@ function App() {
       setSummaryError(null);
       setSummaryLoading(false);
       setView('call');
+      setJoinSessionId('');
+      setJoinError(null);
+      setJoinInFlight(false);
       localStorage.removeItem(LOCAL_STORAGE_KEY);
       return;
     }
@@ -91,6 +102,7 @@ function App() {
     setInviteSelection([]);
     setError(null);
     setAddError(null);
+    setAdapterError(null);
     setTranscriptSegments([]);
     setTranscriptError(null);
     setTranscriptLoading(false);
@@ -98,6 +110,9 @@ function App() {
     setSummaryError(null);
     setSummaryLoading(false);
     setView('call');
+    setJoinSessionId('');
+    setJoinError(null);
+    setJoinInFlight(false);
   }, [selectedUserId]);
 
   const selectedUser = selectedUserId
@@ -105,20 +120,33 @@ function App() {
     : null;
 
   const callAdapterArgs = useMemo<AzureCommunicationCallAdapterArgs | undefined>(() => {
-    if (!callInfo || !selectedUser) return undefined;
+    if (!callInfo || !selectedUser || view !== 'call' || !callInfo.acsToken) return undefined;
     return {
       userId: { communicationUserId: callInfo.acsIdentity },
       displayName: selectedUser.displayName,
       credential: new AzureCommunicationTokenCredential(callInfo.acsToken),
       locator: { groupId: callInfo.acsGroupId }
     };
-  }, [callInfo, selectedUser]);
+  }, [callInfo, selectedUser, view]);
 
-  const callAdapter = useAzureCommunicationCallAdapter(callAdapterArgs);
+  const callAdapter = useAzureCommunicationCallAdapter(callAdapterArgs, (error) => {
+    setAdapterError(error.message || 'Unable to initialize call adapter.');
+  });
 
   useEffect(() => {
+    if (!callAdapter) return;
+
+    setAdapterError(null);
+
+    const onError = (event: AdapterError) => {
+      console.error('ACS adapter error', event);
+      const message = event?.message ?? 'Unexpected adapter error.';
+      setAdapterError(message);
+    };
+
+    callAdapter.on('error', onError);
     return () => {
-      callAdapter?.dispose();
+      callAdapter.off('error', onError);
     };
   }, [callAdapter]);
 
@@ -211,6 +239,7 @@ function App() {
     if (!selectedUser) return;
     setError(null);
     setAddError(null);
+    setAdapterError(null);
     setTranscriptSegments([]);
     setTranscriptError(null);
     setCallSummary(null);
@@ -218,6 +247,7 @@ function App() {
     setSummaryLoading(false);
     setView('call');
     setStartInFlight(true);
+    setJoinError(null);
 
     try {
       const initResponse = await initDemoUser(selectedUser.id);
@@ -240,6 +270,37 @@ function App() {
       setError(message);
     } finally {
       setStartInFlight(false);
+    }
+  };
+
+  const handleJoinCall = async () => {
+    if (!selectedUser || !joinSessionId.trim()) return;
+    setError(null);
+    setAddError(null);
+    setAdapterError(null);
+    setJoinError(null);
+    setTranscriptSegments([]);
+    setTranscriptError(null);
+    setCallSummary(null);
+    setSummaryError(null);
+    setSummaryLoading(false);
+    setView('call');
+    setJoinInFlight(true);
+
+    try {
+      const initResponse = await initDemoUser(selectedUser.id);
+      const response = await joinCall(joinSessionId.trim(), selectedUser.id);
+      const bootstrap = transformCallStart(response, selectedUser, initResponse.acsIdentity);
+      setCallInfo(bootstrap);
+      setCallParticipants(bootstrap.participants);
+      setInviteSelection([]);
+    }
+    catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to join call.';
+      setJoinError(message);
+    }
+    finally {
+      setJoinInFlight(false);
     }
   };
 
@@ -289,6 +350,7 @@ function App() {
   const handleEndCall = async () => {
     if (!callInfo) return;
     callAdapter?.dispose();
+    setAdapterError(null);
     setView('summary');
     await Promise.all([refreshTranscript(), refreshSummary()]);
   };
@@ -297,6 +359,7 @@ function App() {
     setCallInfo(null);
     setCallParticipants([]);
     setInviteSelection([]);
+    setAdapterError(null);
     setTranscriptSegments([]);
     setTranscriptError(null);
     setTranscriptLoading(false);
@@ -304,6 +367,9 @@ function App() {
     setSummaryError(null);
     setSummaryLoading(false);
     setView('call');
+    setJoinSessionId('');
+    setJoinError(null);
+    setJoinInFlight(false);
   };
 
   return (
@@ -336,6 +402,7 @@ function App() {
             callInfo={callInfo}
             callAdapterReady={!!callAdapter}
             error={error}
+            adapterError={adapterError}
             startInFlight={startInFlight}
             callParticipants={callParticipants}
             inviteSelection={inviteSelection}
@@ -350,6 +417,11 @@ function App() {
             transcriptLoading={transcriptLoading}
             transcriptError={transcriptError}
             onRefreshTranscript={() => refreshTranscript()}
+            joinSessionId={joinSessionId}
+            onJoinSessionChange={setJoinSessionId}
+            onJoinCall={handleJoinCall}
+            joinInFlight={joinInFlight}
+            joinError={joinError}
           />
         )}
       </div>
@@ -406,6 +478,7 @@ type CallWorkspaceProps = {
   callAdapterReady: boolean;
   error: string | null;
   addError: string | null;
+  adapterError: string | null;
   startInFlight: boolean;
   addInFlight: boolean;
   onResetUser: () => void;
@@ -415,6 +488,11 @@ type CallWorkspaceProps = {
   transcriptSegments: TranscriptSegment[];
   transcriptLoading: boolean;
   transcriptError: string | null;
+  joinSessionId: string;
+  onJoinSessionChange: (value: string) => void;
+  onJoinCall: () => void;
+  joinInFlight: boolean;
+  joinError: string | null;
 };
 
 function CallWorkspace({
@@ -422,6 +500,11 @@ function CallWorkspace({
   preCallParticipantIds,
   onTogglePreCallParticipant,
   onStartCall,
+  onJoinCall,
+  onJoinSessionChange,
+  joinSessionId,
+  joinInFlight,
+  joinError,
   callInfo,
   callParticipants,
   inviteSelection,
@@ -430,6 +513,7 @@ function CallWorkspace({
   callAdapterReady,
   error,
   addError,
+  adapterError,
   startInFlight,
   addInFlight,
   onResetUser,
@@ -438,7 +522,7 @@ function CallWorkspace({
   transcriptSegments,
   transcriptLoading,
   transcriptError,
-  onRefreshTranscript
+  onRefreshTranscript,
 }: CallWorkspaceProps) {
   const otherUsers = DEMO_USERS.filter((user) => user.id !== selectedUser.id);
   const availableInvitees = otherUsers.filter(
@@ -572,6 +656,29 @@ function CallWorkspace({
                 {startInFlight ? 'Starting...' : 'Start Call'}
               </button>
               {error ? <p className="mt-2 text-sm text-rose-300">{error}</p> : null}
+
+              <div className="mt-5 space-y-2 rounded-lg border border-slate-800/60 bg-slate-950/50 p-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-semibold text-slate-100">Join existing call</span>
+                  <span className="text-xs text-slate-400">Enter call session id</span>
+                </div>
+                <input
+                  className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400/80 focus:ring-1 focus:ring-cyan-500/50"
+                  placeholder="a4aaa355-8caf-4073-a931-270e296ed9be"
+                  value={joinSessionId}
+                  onChange={(e) => onJoinSessionChange(e.target.value)}
+                  spellCheck={false}
+                />
+                <button
+                  className="w-full rounded-lg border border-slate-700 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:border-cyan-400/80 hover:text-cyan-100 disabled:cursor-not-allowed disabled:opacity-70"
+                  type="button"
+                  onClick={onJoinCall}
+                  disabled={joinInFlight || !joinSessionId.trim()}
+                >
+                  {joinInFlight ? 'Joining...' : 'Join Call'}
+                </button>
+                {joinError ? <p className="text-sm text-rose-300">{joinError}</p> : null}
+              </div>
             </>
           )}
           {callInfo ? (
@@ -584,6 +691,12 @@ function CallWorkspace({
                 <div className="text-xs uppercase tracking-[0.08em] text-slate-500">Group ID</div>
                 <code>{callInfo.acsGroupId}</code>
               </div>
+              {callInfo.callConnectionId ? (
+                <div>
+                  <div className="text-xs uppercase tracking-[0.08em] text-slate-500">Call Connection</div>
+                  <code>{callInfo.callConnectionId}</code>
+                </div>
+              ) : null}
             </div>
           ) : null}
         </div>
@@ -600,6 +713,15 @@ function CallWorkspace({
                 scoped to {selectedUser.displayName}.
               </p>
             </div>
+          ) : adapterError && !callAdapter ? (
+            <div className="flex h-full flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-rose-500/50 bg-rose-950/30 p-6 text-center">
+              <p className="text-xs uppercase tracking-[0.1em] text-rose-300">Adapter error</p>
+              <h3 className="text-xl font-semibold text-rose-50">Call UI failed to load</h3>
+              <p className="max-w-xl text-sm text-rose-100">{adapterError}</p>
+              <p className="text-xs text-rose-200">
+                Try ending the call and starting again to refresh your ACS token.
+              </p>
+            </div>
           ) : callAdapterReady ? (
             <CallComposite adapter={callAdapter!} />
           ) : (
@@ -609,6 +731,12 @@ function CallWorkspace({
             </div>
           )}
         </div>
+        {adapterError && callInfo ? (
+          <div className="rounded-xl border border-rose-500/50 bg-rose-500/10 p-3 text-sm text-rose-50 shadow-lg shadow-rose-900/40">
+            <div className="font-semibold">ACS adapter reported an error</div>
+            <div className="text-rose-100">{adapterError}</div>
+          </div>
+        ) : null}
 
         {callInfo ? (
           <TranscriptPanel
@@ -660,7 +788,7 @@ function SummaryView({
   const summaryStatus = callSummary?.summaryStatus ?? 'pending';
   const startedByName = callSummary?.startedByDemoUserId
     ? participants.find((participant) => participant.demoUserId === callSummary.startedByDemoUserId)
-        ?.displayName ?? callSummary.startedByDemoUserId
+      ?.displayName ?? callSummary.startedByDemoUserId
     : participants[0]?.displayName ?? 'Unknown';
   const startedAt = formatDateTime(callSummary?.startedAtUtc);
   const endedAt = formatDateTime(callSummary?.endedAtUtc);
@@ -692,11 +820,10 @@ function SummaryView({
                 </p>
               </div>
               <span
-                className={`rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.08em] ${
-                  summaryStatus === 'ready'
+                className={`rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.08em] ${summaryStatus === 'ready'
                     ? 'bg-emerald-500/20 text-emerald-200'
                     : 'bg-amber-400/20 text-amber-100'
-                }`}
+                  }`}
               >
                 {summaryStatus === 'ready' ? 'Ready' : 'Pending'}
               </span>
@@ -976,17 +1103,16 @@ function transformCallStart(
   selectedUser: DemoUser,
   fallbackAcsIdentity: string
 ): CallBootstrapState {
+  const acsIdentity = payload.acsIdentity ?? fallbackAcsIdentity;
   return {
     callSessionId: payload.callSessionId,
     acsGroupId: payload.acsGroupId,
+    callConnectionId: payload.callConnectionId,
     acsToken: payload.acsToken,
-    acsIdentity: payload.acsIdentity ?? fallbackAcsIdentity,
+    acsIdentity,
+    acsTokenExpiresOn: payload.acsTokenExpiresOn,
     displayName: selectedUser.displayName,
-    participants: normalizeParticipants(
-      payload.participants,
-      selectedUser,
-      payload.acsIdentity ?? fallbackAcsIdentity
-    )
+    participants: normalizeParticipants(payload.participants, selectedUser, acsIdentity)
   };
 }
 

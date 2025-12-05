@@ -22,9 +22,12 @@ var host = new HostBuilder()
         services.AddSingleton<CallSummaryStore>();
         services.AddSingleton<AcsIdentityService>();
         services.AddSingleton<AcsCallService>();
+        services.AddSingleton<AcsTranscriptionService>();
         services.Configure<AcsOptions>(context.Configuration.GetSection("ACS"));
         services.AddSingleton<CallSummaryService>();
         services.Configure<OpenAiOptions>(context.Configuration.GetSection("OpenAI"));
+        services.Configure<SpeechOptions>(context.Configuration.GetSection("Speech"));
+        services.Configure<WebhookAuthOptions>(context.Configuration.GetSection("Webhook"));
     })
     .Build();
 
