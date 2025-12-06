@@ -13,6 +13,10 @@
     "Webhook__Key": "<optional-shared-secret>",
     "Webhook__HeaderName": "x-acs-webhook-key",
     "Webhook__PublicBaseUrl": "<public-url-for-webhook>",
-    "Webhook__EnforceKey": "false"
+    "Webhook__EnforceKey": "false",
+    "Features__EnableTranscription": "true",
+    "Features__EnableSummaries": "true",
+    "Features__CleanupRetentionDays": "3",
+    "Features__StaleCallMinutes": "120"
   }
 }

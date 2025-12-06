@@ -177,6 +177,7 @@ function App() {
   const [transcriptSegments, setTranscriptSegments] = useState<TranscriptSegment[]>([]);
   const [transcriptLoading, setTranscriptLoading] = useState(false);
   const [transcriptError, setTranscriptError] = useState<string | null>(null);
+  const [inCall, setInCall] = useState(false);
   const [callSummary, setCallSummary] = useState<CallSummaryResponse | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summaryError, setSummaryError] = useState<string | null>(null);
@@ -254,6 +255,13 @@ function App() {
     if (!callAdapter) return;
 
     setAdapterError(null);
+    const updateInCall = () => {
+      const state = callAdapter.getState();
+      const callState = state?.call?.state;
+      const active = callState === 'Connected' || callState === 'Connecting';
+      setInCall(active);
+    };
+    updateInCall();
 
     const onError = (event: AdapterError) => {
       console.error('ACS adapter error', event);
@@ -261,8 +269,10 @@ function App() {
       setAdapterError(message);
     };
 
+    callAdapter.onStateChange?.(updateInCall);
     callAdapter.on('error', onError);
     return () => {
+      callAdapter.offStateChange?.(updateInCall);
       callAdapter.off('error', onError);
     };
   }, [callAdapter]);
@@ -330,13 +340,13 @@ function App() {
   );
 
   useEffect(() => {
-    if (!callSessionId || view !== 'call') return;
+    if (!callSessionId || view !== 'call' || !inCall) return;
     refreshTranscript({ silent: true });
     const interval = window.setInterval(() => {
       refreshTranscript({ silent: true });
     }, 3500);
     return () => window.clearInterval(interval);
-  }, [callSessionId, view, refreshTranscript]);
+  }, [callSessionId, view, refreshTranscript, inCall]);
 
   useEffect(() => {
     if (!callSessionId || view !== 'summary') return;

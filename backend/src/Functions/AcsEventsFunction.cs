@@ -113,8 +113,8 @@ public class AcsEventsFunction
     {
         var type = evt.EventType?.ToLowerInvariant() ?? string.Empty;
         var data = evt.Data;
-        var callSessionId = ResolveCallSessionId(data);
-        var callSession = callSessionId is null ? null : _callSessionStore.Get(callSessionId.Value);
+        var callSessionId = await ResolveCallSessionIdAsync(data, cancellationToken);
+        var callSession = callSessionId is null ? null : await _callSessionStore.GetAsync(callSessionId.Value, cancellationToken);
 
         _logger.LogInformation(
             "ACS event {EventType} (groupId={AcsGroupId}, callConnectionId={CallConnectionId}, serverCallId={ServerCallId}, operationContext={OperationContext}, resolvedCallSessionId={ResolvedCallSessionId})",
@@ -140,11 +140,11 @@ public class AcsEventsFunction
 
             if (!string.IsNullOrWhiteSpace(data?.ServerCallId))
             {
-                var pending = _callSessionStore.FindPendingConnection();
+                var pending = await _callSessionStore.FindPendingConnectionAsync(cancellationToken);
                 if (pending is not null)
                 {
                     var resolvedId = pending.Id;
-                    _callSessionStore.SetCallConnection(resolvedId, data.ServerCallId);
+                    await _callSessionStore.SetCallConnectionAsync(resolvedId, data.ServerCallId, cancellationToken);
                     _logger.LogInformation(
                         "Mapped event {EventType} to pending session {CallSessionId} via serverCallId fallback",
                         evt.EventType,
@@ -165,12 +165,12 @@ public class AcsEventsFunction
             var connectionId = data?.CallConnectionId ?? data?.ServerCallId;
             if (!string.IsNullOrWhiteSpace(connectionId))
             {
-                _callSessionStore.SetCallConnection(callSessionId.Value, connectionId);
+                await _callSessionStore.SetCallConnectionAsync(callSessionId.Value, connectionId, cancellationToken);
             }
 
-            _callSessionStore.UpdateStatus(callSessionId.Value, "Connected");
+            await _callSessionStore.UpdateStatusAsync(callSessionId.Value, "Connected", cancellationToken: cancellationToken);
 
-            var latestSession = _callSessionStore.Get(callSessionId.Value);
+            var latestSession = await _callSessionStore.GetAsync(callSessionId.Value, cancellationToken);
             if (latestSession is not null)
             {
                 await _transcriptionService.TryStartAsync(latestSession, cancellationToken);
@@ -184,19 +184,19 @@ public class AcsEventsFunction
 
         if (type.Contains("callstarted") || type.Contains("callconnecting"))
         {
-            _callSessionStore.UpdateStatus(callSessionId.Value, "Connecting");
+            await _callSessionStore.UpdateStatusAsync(callSessionId.Value, "Connecting", cancellationToken: cancellationToken);
             if (!string.IsNullOrWhiteSpace(data?.CallConnectionId))
             {
-                _callSessionStore.SetCallConnection(callSessionId.Value, data.CallConnectionId);
+                await _callSessionStore.SetCallConnectionAsync(callSessionId.Value, data.CallConnectionId, cancellationToken);
             }
             return;
         }
 
         if (type.Contains("callended") || type.Contains("calldisconnected"))
         {
-            _callSessionStore.UpdateStatus(callSessionId.Value, "Completed", DateTime.UtcNow);
+            await _callSessionStore.UpdateStatusAsync(callSessionId.Value, "Completed", DateTime.UtcNow, cancellationToken);
             _logger.LogInformation("Call {CallSessionId} marked completed from ACS event", callSessionId);
-            var latestSession = _callSessionStore.Get(callSessionId.Value);
+            var latestSession = await _callSessionStore.GetAsync(callSessionId.Value, cancellationToken);
             if (latestSession is not null)
             {
                 _ = _transcriptionService.TryStopAsync(latestSession, CancellationToken.None);
@@ -209,7 +209,7 @@ public class AcsEventsFunction
         {
             if (callSession is not null)
             {
-                _callSessionStore.MarkTranscriptionStarted(callSession.Id);
+                await _callSessionStore.MarkTranscriptionStartedAsync(callSession.Id, cancellationToken);
             }
 
             var segments = BuildSegments(callSessionId.Value, callSession, data).ToList();
@@ -230,7 +230,7 @@ public class AcsEventsFunction
         await Task.CompletedTask;
     }
 
-    private Guid? ResolveCallSessionId(AcsEventData? data)
+    private async Task<Guid?> ResolveCallSessionIdAsync(AcsEventData? data, CancellationToken cancellationToken)
     {
         if (data is null)
         {
@@ -249,7 +249,7 @@ public class AcsEventsFunction
 
         if (!string.IsNullOrWhiteSpace(data.AcsGroupId))
         {
-            var byGroup = _callSessionStore.FindByAcsGroupId(data.AcsGroupId);
+            var byGroup = await _callSessionStore.FindByAcsGroupIdAsync(data.AcsGroupId, cancellationToken);
             if (byGroup is not null)
             {
                 return byGroup.Id;
@@ -258,7 +258,7 @@ public class AcsEventsFunction
 
         if (!string.IsNullOrWhiteSpace(data.GroupCallId))
         {
-            var byGroupId = _callSessionStore.FindByAcsGroupId(data.GroupCallId);
+            var byGroupId = await _callSessionStore.FindByAcsGroupIdAsync(data.GroupCallId, cancellationToken);
             if (byGroupId is not null)
             {
                 return byGroupId.Id;
@@ -267,7 +267,7 @@ public class AcsEventsFunction
 
         if (!string.IsNullOrWhiteSpace(data.CallConnectionId))
         {
-            var byConnection = _callSessionStore.FindByCallConnectionId(data.CallConnectionId);
+            var byConnection = await _callSessionStore.FindByCallConnectionIdAsync(data.CallConnectionId, cancellationToken);
             if (byConnection is not null)
             {
                 return byConnection.Id;
@@ -277,9 +277,9 @@ public class AcsEventsFunction
         if (!string.IsNullOrWhiteSpace(data.ServerCallId))
         {
             var decoded = DecodeBase64Safe(data.ServerCallId);
-            var byServerId = _callSessionStore.FindByCallConnectionId(data.ServerCallId)
+            var byServerId = await _callSessionStore.FindByCallConnectionIdAsync(data.ServerCallId, cancellationToken)
                 ?? (!string.IsNullOrWhiteSpace(decoded)
-                    ? _callSessionStore.FindByCallConnectionId(decoded)
+                    ? await _callSessionStore.FindByCallConnectionIdAsync(decoded, cancellationToken)
                     : null);
             if (byServerId is not null)
             {
@@ -288,7 +288,7 @@ public class AcsEventsFunction
         }
 
         // Last resort: map to the first pending active/connecting session (POC fallback).
-        var pending = _callSessionStore.FindPendingConnection();
+        var pending = await _callSessionStore.FindPendingConnectionAsync(cancellationToken);
         return pending?.Id;
     }
 

@@ -71,7 +71,7 @@ public class CallsJoinFunction
             return bad;
         }
 
-        var session = _callSessionStore.Get(callSessionGuid);
+        var session = await _callSessionStore.GetAsync(callSessionGuid, req.FunctionContext.CancellationToken);
         if (session is null)
         {
             var notFound = _responseFactory.CreateJson(
@@ -131,7 +131,10 @@ public class CallsJoinFunction
 
         var participant = new CallParticipant(Guid.NewGuid(), demoUser.Id, demoUser.DisplayName, acsIdentity);
 
-        var updated = _callSessionStore.AddParticipants(callSessionGuid, new[] { participant });
+        var updated = await _callSessionStore.AddParticipantsAsync(
+            callSessionGuid,
+            new[] { participant },
+            req.FunctionContext.CancellationToken);
         if (updated is null)
         {
             var gone = _responseFactory.CreateJson(
@@ -142,7 +145,7 @@ public class CallsJoinFunction
             return gone;
         }
 
-        _ = _acsCallService.TryAddParticipantAsync(
+        var inviteDispatched = await _acsCallService.TryAddParticipantAsync(
             updated.Id,
             updated.CallConnectionId,
             participant,
@@ -153,6 +156,7 @@ public class CallsJoinFunction
             callSessionId = updated.Id,
             acsGroupId = updated.AcsGroupId,
             callConnectionId = updated.CallConnectionId,
+            status = updated.Status,
             acsToken,
             acsTokenExpiresOn = tokenExpiresOn,
             acsIdentity,
@@ -162,7 +166,13 @@ public class CallsJoinFunction
                 p.DemoUserId,
                 p.DisplayName,
                 p.AcsIdentity
-            })
+            }),
+            acsInviteDispatched = inviteDispatched,
+            acsInviteStatus = inviteDispatched
+                ? "dispatched"
+                : string.IsNullOrWhiteSpace(updated.CallConnectionId)
+                    ? "pending-connection"
+                    : "failed"
         };
 
         var ok = _responseFactory.CreateJson(req, HttpStatusCode.OK, payload);

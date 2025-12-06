@@ -127,13 +127,19 @@ public class CallsStartFunction
         }
 
         var acsGroupId = Guid.NewGuid().ToString();
-        var callSession = _callSessionStore.Create(initiator.Id, acsGroupId, participants);
+        var callSession = await _callSessionStore.CreateAsync(
+            initiator.Id,
+            acsGroupId,
+            participants,
+            callConnectionId: null,
+            cancellationToken: req.FunctionContext.CancellationToken);
 
         var payload = new
         {
             callSessionId = callSession.Id,
             acsGroupId,
             callConnectionId = callSession.CallConnectionId,
+            status = callSession.Status,
             acsToken,
             acsTokenExpiresOn = tokenExpiresOn,
             acsIdentity,

@@ -76,7 +76,7 @@ public class CallsAddParticipantFunction
             return bad;
         }
 
-        var session = _callSessionStore.Get(callSessionGuid);
+        var session = await _callSessionStore.GetAsync(callSessionGuid, req.FunctionContext.CancellationToken);
         if (session is null)
         {
             var notFound = _responseFactory.CreateJson(
@@ -153,7 +153,10 @@ public class CallsAddParticipantFunction
             return bad;
         }
 
-        var updated = _callSessionStore.AddParticipants(callSessionGuid, added.Select(a => a.Participant).ToList());
+        var updated = await _callSessionStore.AddParticipantsAsync(
+            callSessionGuid,
+            added.Select(a => a.Participant).ToList(),
+            req.FunctionContext.CancellationToken);
         if (updated is null)
         {
             var gone = _responseFactory.CreateJson(
@@ -175,7 +178,12 @@ public class CallsAddParticipantFunction
                 a.Participant.DemoUserId,
                 a.Participant.DisplayName,
                 a.Participant.AcsIdentity,
-                acsInviteDispatched = a.AcsInviteSent
+                acsInviteDispatched = a.AcsInviteSent,
+                acsInviteStatus = a.AcsInviteSent
+                    ? "dispatched"
+                    : string.IsNullOrWhiteSpace(updated.CallConnectionId)
+                        ? "pending-connection"
+                        : "failed"
             }),
             participants = updated.Participants.Select(p => new
             {
@@ -184,6 +192,7 @@ public class CallsAddParticipantFunction
                 p.DisplayName,
                 p.AcsIdentity
             }),
+            status = updated.Status,
             skipped
         };
 

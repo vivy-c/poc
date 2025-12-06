@@ -28,6 +28,7 @@ var host = new HostBuilder()
         services.Configure<OpenAiOptions>(context.Configuration.GetSection("OpenAI"));
         services.Configure<SpeechOptions>(context.Configuration.GetSection("Speech"));
         services.Configure<WebhookAuthOptions>(context.Configuration.GetSection("Webhook"));
+        services.Configure<FeatureFlagsOptions>(context.Configuration.GetSection("Features"));
     })
     .Build();
 

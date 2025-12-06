@@ -17,6 +17,7 @@ public class CallSummaryService
     private readonly CallSummaryStore _summaryStore;
     private readonly OpenAIClient? _openAiClient;
     private readonly OpenAiOptions _options;
+    private readonly bool _enableSummaries;
     private readonly ILogger _logger;
     private readonly ConcurrentDictionary<Guid, Task<CallSummary?>> _inFlight = new();
 
@@ -25,12 +26,14 @@ public class CallSummaryService
         TranscriptStore transcriptStore,
         CallSummaryStore summaryStore,
         IOptions<OpenAiOptions> options,
+        IOptions<FeatureFlagsOptions> featureFlags,
         ILoggerFactory loggerFactory)
     {
         _callSessionStore = callSessionStore;
         _transcriptStore = transcriptStore;
         _summaryStore = summaryStore;
         _options = options.Value;
+        _enableSummaries = featureFlags.Value.EnableSummaries;
         _logger = loggerFactory.CreateLogger<CallSummaryService>();
 
         var endpoint = NormalizeEndpoint(_options.Endpoint);
@@ -90,7 +93,7 @@ public class CallSummaryService
 
     private async Task<CallSummary?> GenerateSummaryInternalAsync(Guid callSessionId, CancellationToken cancellationToken)
     {
-        var session = _callSessionStore.Get(callSessionId);
+        var session = await _callSessionStore.GetAsync(callSessionId, cancellationToken);
         if (session is null)
         {
             _logger.LogWarning("Cannot summarize unknown call {CallSessionId}", callSessionId);
@@ -100,7 +103,7 @@ public class CallSummaryService
         var segments = _transcriptStore.GetByCallSession(callSessionId);
         CallSummary? summary = null;
 
-        if (_openAiClient is not null && !string.IsNullOrWhiteSpace(_options.DeploymentName))
+        if (_enableSummaries && _openAiClient is not null && !string.IsNullOrWhiteSpace(_options.DeploymentName))
         {
             summary = await TrySummarizeWithOpenAiAsync(session, segments, cancellationToken);
         }

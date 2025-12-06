@@ -15,12 +15,14 @@ public class AcsTranscriptionService
     private readonly bool _speechConfigured;
     private readonly string _locale;
     private readonly Uri? _callbackUri;
+    private readonly bool _transcriptionEnabled;
 
     public AcsTranscriptionService(
         CallSessionStore callSessionStore,
         IOptions<AcsOptions> acsOptions,
         IOptions<SpeechOptions> speechOptions,
         IOptions<WebhookAuthOptions> webhookOptions,
+        IOptions<FeatureFlagsOptions> featureFlags,
         ILoggerFactory loggerFactory)
     {
         var connectionString = acsOptions.Value.ConnectionString;
@@ -32,6 +34,7 @@ public class AcsTranscriptionService
         _callAutomationClient = new CallAutomationClient(connectionString);
         _callSessionStore = callSessionStore;
         _logger = loggerFactory.CreateLogger<AcsTranscriptionService>();
+        _transcriptionEnabled = featureFlags.Value.EnableTranscription;
 
         var speech = speechOptions.Value;
         _locale = string.IsNullOrWhiteSpace(speech.Locale) ? "en-US" : speech.Locale;
@@ -58,6 +61,12 @@ public class AcsTranscriptionService
 
     public async Task<bool> TryStartAsync(CallSession session, CancellationToken cancellationToken = default)
     {
+        if (!_transcriptionEnabled)
+        {
+            _logger.LogInformation("Transcription disabled via feature flag; skipping start for {CallSessionId}", session.Id);
+            return false;
+        }
+
         if (!_speechConfigured)
         {
             return false;
@@ -87,7 +96,7 @@ public class AcsTranscriptionService
             };
 
             await media.StartTranscriptionAsync(options, cancellationToken);
-            _callSessionStore.MarkTranscriptionStarted(session.Id);
+            await _callSessionStore.MarkTranscriptionStartedAsync(session.Id, cancellationToken);
             _logger.LogInformation(
                 "Transcription started for {CallSessionId} (operationContext={OperationContext}, locale={Locale})",
                 session.Id,
@@ -118,6 +127,11 @@ public class AcsTranscriptionService
 
     public async Task<bool> TryStopAsync(CallSession session, CancellationToken cancellationToken = default)
     {
+        if (!_transcriptionEnabled)
+        {
+            return false;
+        }
+
         if (!_speechConfigured)
         {
             return false;

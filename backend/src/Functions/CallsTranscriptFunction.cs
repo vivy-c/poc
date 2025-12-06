@@ -23,7 +23,7 @@ public class CallsTranscriptFunction
     }
 
     [Function("calls-get-transcript")]
-    public HttpResponseData Run(
+    public async Task<HttpResponseData> RunAsync(
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", "options", Route = "calls/{callSessionId:guid}/transcript")] HttpRequestData req,
         string callSessionId)
     {
@@ -46,7 +46,7 @@ public class CallsTranscriptFunction
             return bad;
         }
 
-        var session = _callSessionStore.Get(callSessionGuid);
+        var session = await _callSessionStore.GetAsync(callSessionGuid, req.FunctionContext.CancellationToken);
         if (session is null)
         {
             var notFound = _responseFactory.CreateJson(

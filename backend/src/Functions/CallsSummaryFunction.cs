@@ -46,7 +46,7 @@ public class CallsSummaryFunction
             return bad;
         }
 
-        var session = _callSessionStore.Get(callSessionGuid);
+        var session = await _callSessionStore.GetAsync(callSessionGuid, req.FunctionContext.CancellationToken);
         if (session is null)
         {
             var notFound = _responseFactory.CreateJson(
