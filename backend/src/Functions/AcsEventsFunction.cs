@@ -116,21 +116,56 @@ public class AcsEventsFunction
         var callSessionId = ResolveCallSessionId(data);
         var callSession = callSessionId is null ? null : _callSessionStore.Get(callSessionId.Value);
 
+        _logger.LogInformation(
+            "ACS event {EventType} (groupId={AcsGroupId}, callConnectionId={CallConnectionId}, serverCallId={ServerCallId}, operationContext={OperationContext}, resolvedCallSessionId={ResolvedCallSessionId})",
+            evt.EventType,
+            data?.AcsGroupId ?? data?.GroupCallId,
+            data?.CallConnectionId,
+            data?.ServerCallId,
+            data?.OperationContext,
+            callSessionId);
+
         if (callSessionId is null)
         {
             _logger.LogWarning(
-                "Received ACS event {EventType} but could not map to a call session (groupId={AcsGroupId}, callConnection={CallConnectionId})",
+                "Received ACS event {EventType} but could not map to a call session (groupId={AcsGroupId}, callConnection={CallConnectionId}, serverCallId={ServerCallId}, serverCallIdDecoded={ServerCallIdDecoded}, operationContext={OperationContext}, callSessionIdField={CallSessionIdField}, groupCallId={GroupCallId})",
                 evt.EventType,
-                data?.AcsGroupId,
-                data?.CallConnectionId ?? data?.ServerCallId);
-            return;
+                data?.AcsGroupId ?? data?.GroupCallId,
+                data?.CallConnectionId,
+                data?.ServerCallId,
+                DecodeBase64Safe(data?.ServerCallId),
+                data?.OperationContext,
+                data?.CallSessionId,
+                data?.GroupCallId);
+
+            if (!string.IsNullOrWhiteSpace(data?.ServerCallId))
+            {
+                var pending = _callSessionStore.FindPendingConnection();
+                if (pending is not null)
+                {
+                    var resolvedId = pending.Id;
+                    _callSessionStore.SetCallConnection(resolvedId, data.ServerCallId);
+                    _logger.LogInformation(
+                        "Mapped event {EventType} to pending session {CallSessionId} via serverCallId fallback",
+                        evt.EventType,
+                        resolvedId);
+                    data.CallSessionId = resolvedId.ToString();
+                    callSessionId = resolvedId;
+                    callSession = pending;
+                }
+            }
+            if (callSessionId is null)
+            {
+                return;
+            }
         }
 
         if (type.Contains("callconnected"))
         {
-            if (!string.IsNullOrWhiteSpace(data?.CallConnectionId))
+            var connectionId = data?.CallConnectionId ?? data?.ServerCallId;
+            if (!string.IsNullOrWhiteSpace(connectionId))
             {
-                _callSessionStore.SetCallConnection(callSessionId.Value, data.CallConnectionId);
+                _callSessionStore.SetCallConnection(callSessionId.Value, connectionId);
             }
 
             _callSessionStore.UpdateStatus(callSessionId.Value, "Connected");
@@ -241,14 +276,20 @@ public class AcsEventsFunction
 
         if (!string.IsNullOrWhiteSpace(data.ServerCallId))
         {
-            var byServerId = _callSessionStore.FindByCallConnectionId(data.ServerCallId);
+            var decoded = DecodeBase64Safe(data.ServerCallId);
+            var byServerId = _callSessionStore.FindByCallConnectionId(data.ServerCallId)
+                ?? (!string.IsNullOrWhiteSpace(decoded)
+                    ? _callSessionStore.FindByCallConnectionId(decoded)
+                    : null);
             if (byServerId is not null)
             {
                 return byServerId.Id;
             }
         }
 
-        return null;
+        // Last resort: map to the first pending active/connecting session (POC fallback).
+        var pending = _callSessionStore.FindPendingConnection();
+        return pending?.Id;
     }
 
     private IEnumerable<TranscriptSegment> BuildSegments(Guid callSessionId, CallSession? callSession, AcsEventData? data)
@@ -387,7 +428,7 @@ public class AcsEventsFunction
 
     private bool IsAuthorized(HttpRequestData req)
     {
-        if (string.IsNullOrWhiteSpace(_webhookOptions.Key))
+        if (string.IsNullOrWhiteSpace(_webhookOptions.Key) || !_webhookOptions.EnforceKey)
         {
             return true;
         }
@@ -479,6 +520,25 @@ public class AcsEventsFunction
     }
 
     private sealed record IncomingEvent(string EventType, AcsEventData? Data, DateTimeOffset? EventTime);
+
+    private static string? DecodeBase64Safe(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        try
+        {
+            var padded = value.Length % 4 == 0 ? value : value.PadRight(value.Length + (4 - value.Length % 4), '=');
+            var bytes = Convert.FromBase64String(padded);
+            return System.Text.Encoding.UTF8.GetString(bytes);
+        }
+        catch
+        {
+            return null;
+        }
+    }
 
     private sealed class AcsEventData
     {

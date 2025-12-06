@@ -43,6 +43,14 @@ public class CallSessionStore
             s => string.Equals(s.CallConnectionId, callConnectionId, StringComparison.OrdinalIgnoreCase));
     }
 
+    public CallSession? FindPendingConnection()
+    {
+        return _sessions.Values.FirstOrDefault(
+            s => string.IsNullOrWhiteSpace(s.CallConnectionId)
+                && (string.Equals(s.Status, "Active", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(s.Status, "Connecting", StringComparison.OrdinalIgnoreCase)));
+    }
+
     public CallSession? AddParticipants(Guid callSessionId, IReadOnlyCollection<CallParticipant> participants)
     {
         if (!_sessions.TryGetValue(callSessionId, out var existing))

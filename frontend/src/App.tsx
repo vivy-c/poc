@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './index.css';
 import {
   AzureCommunicationTokenCredential,
@@ -32,9 +32,138 @@ type CallBootstrapState = {
 type ViewMode = 'call' | 'summary';
 
 const LOCAL_STORAGE_KEY = 'call-demo-user';
+const AUTO_JOIN_STORAGE_KEY = 'call-auto-join';
+const AUTO_JOIN_TTL_MS = 1000 * 60 * 60 * 12; // 12 hours
+const CALL_SESSION_ID_PATTERN =
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+type AutoJoinIntent = {
+  demoUserId: string;
+  createdAt: number;
+};
+
+function parseCallSessionIdFromPath(): string | null {
+  if (typeof window === 'undefined') return null;
+  const segment = window.location.pathname.replace(/^\//, '').split('/')[0];
+  if (!segment || !CALL_SESSION_ID_PATTERN.test(segment)) {
+    return null;
+  }
+  return segment;
+}
+
+function readAutoJoinStore(): Record<string, AutoJoinIntent> {
+  if (typeof window === 'undefined') return {};
+  const raw = localStorage.getItem(AUTO_JOIN_STORAGE_KEY);
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw) as Record<string, AutoJoinIntent>;
+    return parsed ?? {};
+  } catch {
+    localStorage.removeItem(AUTO_JOIN_STORAGE_KEY);
+    return {};
+  }
+}
+
+function persistAutoJoinStore(store: Record<string, AutoJoinIntent>) {
+  if (typeof window === 'undefined') return;
+  localStorage.setItem(AUTO_JOIN_STORAGE_KEY, JSON.stringify(store));
+}
+
+function getAutoJoinIntent(callSessionId: string | null): AutoJoinIntent | null {
+  if (!callSessionId) return null;
+  const store = readAutoJoinStore();
+  const intent = store[callSessionId];
+  if (!intent) return null;
+  const isExpired = Date.now() - intent.createdAt > AUTO_JOIN_TTL_MS;
+  if (isExpired) {
+    delete store[callSessionId];
+    persistAutoJoinStore(store);
+    return null;
+  }
+  return intent;
+}
+
+function setAutoJoinIntent(callSessionId: string, demoUserId: string) {
+  if (typeof window === 'undefined') return;
+  const store = readAutoJoinStore();
+  store[callSessionId] = { demoUserId, createdAt: Date.now() };
+  persistAutoJoinStore(store);
+}
+
+function buildCallUrl(callSessionId: string) {
+  if (typeof window === 'undefined') {
+    return `/${callSessionId}`;
+  }
+  const url = new URL(window.location.href);
+  url.pathname = `/${callSessionId}`;
+  url.search = '';
+  url.hash = '';
+  return url.toString();
+}
+
+function openAutoJoinWindow(callSessionId: string, pendingWindow: Window | null) {
+  if (typeof window === 'undefined') return;
+
+  const callUrl = buildCallUrl(callSessionId);
+  const targetWindow =
+    pendingWindow && !pendingWindow.closed ? pendingWindow : window.open('', '_blank');
+
+  if (!targetWindow) {
+    window.open(callUrl, '_blank');
+    return;
+  }
+
+  try {
+    const doc = targetWindow.document;
+    doc.open();
+    doc.write(
+      `<div style="font-family: system-ui, -apple-system, sans-serif; padding: 16px;">
+        <p>Launching call window...</p>
+        <p><a href="${callUrl}" target="_self" rel="noreferrer">Click here if you are not redirected automatically.</a></p>
+      </div>`
+    );
+    doc.close();
+  } catch {
+    // ignore fallback rendering issues; navigation below will still be attempted
+  }
+
+  targetWindow.opener = null;
+
+  try {
+    targetWindow.location.replace(callUrl);
+  } catch {
+    targetWindow.location.href = callUrl;
+  }
+  targetWindow.focus();
+}
+
+function resolveInitialDemoUserId(
+  _pathCallSessionId: string | null,
+  autoJoinIntent: AutoJoinIntent | null
+) {
+  if (autoJoinIntent?.demoUserId) {
+    return autoJoinIntent.demoUserId;
+  }
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  const stored = localStorage.getItem(LOCAL_STORAGE_KEY);
+  if (!stored) return null;
+  try {
+    const parsed = JSON.parse(stored) as { demoUserId?: string };
+    return parsed.demoUserId ?? null;
+  } catch {
+    localStorage.removeItem(LOCAL_STORAGE_KEY);
+    return null;
+  }
+}
 
 function App() {
-  const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
+  const pathCallSessionId = parseCallSessionIdFromPath();
+  const initialAutoJoinIntent = getAutoJoinIntent(pathCallSessionId);
+  const [selectedUserId, setSelectedUserId] = useState<string | null>(() =>
+    resolveInitialDemoUserId(pathCallSessionId, initialAutoJoinIntent)
+  );
   const [preCallParticipantIds, setPreCallParticipantIds] = useState<string[]>([]);
   const [callParticipants, setCallParticipants] = useState<CallParticipant[]>([]);
   const [inviteSelection, setInviteSelection] = useState<string[]>([]);
@@ -51,23 +180,11 @@ function App() {
   const [callSummary, setCallSummary] = useState<CallSummaryResponse | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summaryError, setSummaryError] = useState<string | null>(null);
-  const [joinSessionId, setJoinSessionId] = useState('');
+  const [joinSessionId, setJoinSessionId] = useState(pathCallSessionId ?? '');
   const [joinInFlight, setJoinInFlight] = useState(false);
   const [joinError, setJoinError] = useState<string | null>(null);
-
-  useEffect(() => {
-    const stored = localStorage.getItem(LOCAL_STORAGE_KEY);
-    if (stored) {
-      try {
-        const parsed = JSON.parse(stored) as { demoUserId?: string };
-        if (parsed.demoUserId) {
-          setSelectedUserId(parsed.demoUserId);
-        }
-      } catch {
-        localStorage.removeItem(LOCAL_STORAGE_KEY);
-      }
-    }
-  }, []);
+  const [autoJoinIntent] = useState<AutoJoinIntent | null>(initialAutoJoinIntent);
+  const autoJoinTriggeredRef = useRef(false);
 
   useEffect(() => {
     if (!selectedUserId) {
@@ -85,7 +202,7 @@ function App() {
       setSummaryError(null);
       setSummaryLoading(false);
       setView('call');
-      setJoinSessionId('');
+      setJoinSessionId(pathCallSessionId ?? '');
       setJoinError(null);
       setJoinInFlight(false);
       localStorage.removeItem(LOCAL_STORAGE_KEY);
@@ -110,10 +227,10 @@ function App() {
     setSummaryError(null);
     setSummaryLoading(false);
     setView('call');
-    setJoinSessionId('');
+    setJoinSessionId(pathCallSessionId ?? '');
     setJoinError(null);
     setJoinInFlight(false);
-  }, [selectedUserId]);
+  }, [selectedUserId, pathCallSessionId]);
 
   const selectedUser = selectedUserId
     ? DEMO_USERS.find((user) => user.id === selectedUserId) ?? null
@@ -237,6 +354,13 @@ function App() {
 
   const handleStartCall = async () => {
     if (!selectedUser) return;
+    const hasPreselectedParticipant = preCallParticipantIds.some(
+      (id) => id !== selectedUser.id
+    );
+    const pendingAutoJoinWindow =
+      hasPreselectedParticipant && typeof window !== 'undefined'
+        ? window.open('', '_blank')
+        : null;
     setError(null);
     setAddError(null);
     setAdapterError(null);
@@ -265,16 +389,30 @@ function App() {
       setCallInfo(bootstrap);
       setCallParticipants(bootstrap.participants);
       setInviteSelection([]);
+
+      const autoJoinTarget = bootstrap.participants.find(
+        (participant) => participant.demoUserId !== selectedUser.id
+      );
+      if (autoJoinTarget) {
+        setAutoJoinIntent(bootstrap.callSessionId, autoJoinTarget.demoUserId);
+        openAutoJoinWindow(bootstrap.callSessionId, pendingAutoJoinWindow);
+      } else if (pendingAutoJoinWindow && !pendingAutoJoinWindow.closed) {
+        pendingAutoJoinWindow.close();
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to start call.';
       setError(message);
+      if (pendingAutoJoinWindow && !pendingAutoJoinWindow.closed) {
+        pendingAutoJoinWindow.close();
+      }
     } finally {
       setStartInFlight(false);
     }
   };
 
-  const handleJoinCall = async () => {
+  const handleJoinCall = useCallback(async () => {
     if (!selectedUser || !joinSessionId.trim()) return;
+    const trimmedSessionId = joinSessionId.trim();
     setError(null);
     setAddError(null);
     setAdapterError(null);
@@ -289,7 +427,7 @@ function App() {
 
     try {
       const initResponse = await initDemoUser(selectedUser.id);
-      const response = await joinCall(joinSessionId.trim(), selectedUser.id);
+      const response = await joinCall(trimmedSessionId, selectedUser.id);
       const bootstrap = transformCallStart(response, selectedUser, initResponse.acsIdentity);
       setCallInfo(bootstrap);
       setCallParticipants(bootstrap.participants);
@@ -302,7 +440,25 @@ function App() {
     finally {
       setJoinInFlight(false);
     }
-  };
+  }, [selectedUser, joinSessionId]);
+
+  useEffect(() => {
+    if (!pathCallSessionId || !autoJoinIntent?.demoUserId) return;
+    if (autoJoinTriggeredRef.current) return;
+
+    if (selectedUser?.id !== autoJoinIntent.demoUserId) {
+      setSelectedUserId(autoJoinIntent.demoUserId);
+      return;
+    }
+
+    if (!joinSessionId.trim()) {
+      setJoinSessionId(pathCallSessionId);
+      return;
+    }
+
+    autoJoinTriggeredRef.current = true;
+    void handleJoinCall();
+  }, [autoJoinIntent, handleJoinCall, joinSessionId, pathCallSessionId, selectedUser]);
 
   const handleAddParticipants = async () => {
     if (!callInfo || inviteSelection.length === 0) return;
@@ -367,7 +523,7 @@ function App() {
     setSummaryError(null);
     setSummaryLoading(false);
     setView('call');
-    setJoinSessionId('');
+    setJoinSessionId(pathCallSessionId ?? '');
     setJoinError(null);
     setJoinInFlight(false);
   };

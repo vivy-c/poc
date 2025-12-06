@@ -6,10 +6,13 @@
     "ACS__ConnectionString": "<acs-connection-string>",
     "Speech__Key": "<speech-key>",
     "Speech__Region": "<speech-region>",
-    "OpenAI__Endpoint": "<openai-endpoint>",
+    "Speech__Locale": "en-US",
+    "OpenAI__Endpoint": "https://<resource-name>.openai.azure.com/",
     "OpenAI__Key": "<openai-key>",
     "OpenAI__DeploymentName": "<openai-deployment>",
     "Webhook__Key": "<optional-shared-secret>",
-    "Webhook__HeaderName": "x-acs-webhook-key"
+    "Webhook__HeaderName": "x-acs-webhook-key",
+    "Webhook__PublicBaseUrl": "<public-url-for-webhook>",
+    "Webhook__EnforceKey": "false"
   }
 }

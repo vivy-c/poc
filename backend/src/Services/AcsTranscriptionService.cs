@@ -1,3 +1,4 @@
+using Azure;
 using Azure.Communication.CallAutomation;
 using CallTranscription.Functions.Common;
 using CallTranscription.Functions.Models;
@@ -12,11 +13,14 @@ public class AcsTranscriptionService
     private readonly CallSessionStore _callSessionStore;
     private readonly ILogger _logger;
     private readonly bool _speechConfigured;
+    private readonly string _locale;
+    private readonly Uri? _callbackUri;
 
     public AcsTranscriptionService(
         CallSessionStore callSessionStore,
         IOptions<AcsOptions> acsOptions,
         IOptions<SpeechOptions> speechOptions,
+        IOptions<WebhookAuthOptions> webhookOptions,
         ILoggerFactory loggerFactory)
     {
         var connectionString = acsOptions.Value.ConnectionString;
@@ -30,10 +34,25 @@ public class AcsTranscriptionService
         _logger = loggerFactory.CreateLogger<AcsTranscriptionService>();
 
         var speech = speechOptions.Value;
+        _locale = string.IsNullOrWhiteSpace(speech.Locale) ? "en-US" : speech.Locale;
         _speechConfigured = !string.IsNullOrWhiteSpace(speech.Key) && !string.IsNullOrWhiteSpace(speech.Region);
         if (!_speechConfigured)
         {
             _logger.LogWarning("Speech configuration missing; transcription orchestration will be a no-op.");
+        }
+
+        var webhook = webhookOptions.Value;
+        if (!string.IsNullOrWhiteSpace(webhook.PublicBaseUrl))
+        {
+            var baseUrl = webhook.PublicBaseUrl.TrimEnd('/');
+            if (Uri.TryCreate($"{baseUrl}/api/acs/events", UriKind.Absolute, out var uri))
+            {
+                _callbackUri = uri;
+            }
+            else
+            {
+                _logger.LogWarning("Webhook public base URL is invalid; transcription callbacks will not be set.");
+            }
         }
     }
 
@@ -59,15 +78,32 @@ public class AcsTranscriptionService
 
         try
         {
-            // TODO: Replace placeholder once ACS exposes transcription start APIs in SDK.
+            var media = _callAutomationClient.GetCallConnection(session.CallConnectionId).GetCallMedia();
+            var options = new StartTranscriptionOptions
+            {
+                Locale = _locale,
+                OperationContext = session.OperationContext,
+                OperationCallbackUri = _callbackUri
+            };
+
+            await media.StartTranscriptionAsync(options, cancellationToken);
             _callSessionStore.MarkTranscriptionStarted(session.Id);
             _logger.LogInformation(
-                "Marked transcription as started for {CallSessionId} (operationContext={OperationContext})",
+                "Transcription started for {CallSessionId} (operationContext={OperationContext}, locale={Locale})",
                 session.Id,
-                session.OperationContext);
-
-            await Task.CompletedTask;
+                session.OperationContext,
+                _locale);
             return true;
+        }
+        catch (RequestFailedException ex)
+        {
+            _logger.LogError(
+                ex,
+                "Failed to start transcription for call {CallSessionId} (connectionId={CallConnectionId}); status={Status}",
+                session.Id,
+                session.CallConnectionId,
+                ex.Status);
+            return false;
         }
         catch (Exception ex)
         {
@@ -97,14 +133,28 @@ public class AcsTranscriptionService
 
         try
         {
-            // TODO: Wire up ACS/Speech stop transcription call when available.
+            var media = _callAutomationClient.GetCallConnection(session.CallConnectionId).GetCallMedia();
+            var options = new StopTranscriptionOptions
+            {
+                OperationContext = session.OperationContext,
+                OperationCallbackUri = _callbackUri?.ToString()
+            };
+            await media.StopTranscriptionAsync(options, cancellationToken);
             _logger.LogInformation(
                 "Transcription stop requested for {CallSessionId} (operationContext={OperationContext})",
                 session.Id,
                 session.OperationContext);
-
-            await Task.CompletedTask;
             return true;
+        }
+        catch (RequestFailedException ex)
+        {
+            _logger.LogError(
+                ex,
+                "Failed to stop transcription for call {CallSessionId} (connectionId={CallConnectionId}); status={Status}",
+                session.Id,
+                session.CallConnectionId,
+                ex.Status);
+            return false;
         }
         catch (Exception ex)
         {

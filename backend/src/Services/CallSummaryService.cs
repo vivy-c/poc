@@ -33,11 +33,12 @@ public class CallSummaryService
         _options = options.Value;
         _logger = loggerFactory.CreateLogger<CallSummaryService>();
 
-        if (!string.IsNullOrWhiteSpace(_options.Endpoint) && !string.IsNullOrWhiteSpace(_options.Key))
+        var endpoint = NormalizeEndpoint(_options.Endpoint);
+        if (endpoint is not null && !string.IsNullOrWhiteSpace(_options.Key))
         {
             try
             {
-                _openAiClient = new OpenAIClient(new Uri(_options.Endpoint), new AzureKeyCredential(_options.Key));
+                _openAiClient = new OpenAIClient(endpoint, new AzureKeyCredential(_options.Key));
             }
             catch (Exception ex)
             {
@@ -121,10 +122,7 @@ public class CallSummaryService
                 "Summary <= 120 words; 3-6 keyPoints; actionItems must be concrete next steps.";
 
             var options = new ChatCompletionsOptions
-            {
-                Temperature = 0.35f,
-                MaxTokens = 700
-            };
+            {};
 
             options.DeploymentName = _options.DeploymentName;
 
@@ -366,5 +364,27 @@ public class CallSummaryService
         }
 
         return text.Substring(0, maxLength).TrimEnd() + "...";
+    }
+
+    private static Uri? NormalizeEndpoint(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return null;
+        }
+
+        var trimmed = raw.Trim();
+        var openaiIndex = trimmed.IndexOf("/openai", StringComparison.OrdinalIgnoreCase);
+        if (openaiIndex > 0)
+        {
+            trimmed = trimmed[..openaiIndex];
+        }
+
+        if (!trimmed.EndsWith("/"))
+        {
+            trimmed += "/";
+        }
+
+        return Uri.TryCreate(trimmed, UriKind.Absolute, out var uri) ? uri : null;
     }
 }
