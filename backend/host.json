@@ -5,6 +5,16 @@
       "samplingSettings": {
         "isEnabled": true
       }
+    },
+    "logLevel": {
+      "Host": "Warning",
+      "Host.Http": "Warning",
+      "Host.General": "Warning",
+      "Host.Results": "Warning",
+      "Function": "Information",
+      "Microsoft": "Warning",
+      "Function.calls-get-transcript": "None",
+      "Function.calls-get-transcript.User": "None"
     }
   },
   "extensions": {

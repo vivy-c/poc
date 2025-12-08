@@ -49,6 +49,7 @@ public class CallSessionStore
         string acsGroupId,
         IReadOnlyList<CallParticipant> participants,
         string? callConnectionId = null,
+        string? serverCallId = null,
         CancellationToken cancellationToken = default)
     {
         var session = new CallSession(
@@ -58,7 +59,8 @@ public class CallSessionStore
             startedByDemoUserId,
             Status: "Active",
             participants,
-            callConnectionId);
+            callConnectionId,
+            serverCallId);
 
         _sessions[session.Id] = session;
         await PersistSessionAsync(session, cancellationToken);
@@ -131,6 +133,33 @@ public class CallSessionStore
         }
     }
 
+    public async Task<CallSession?> FindByServerCallIdAsync(string serverCallId, CancellationToken cancellationToken = default)
+    {
+        var cached = _sessions.Values.FirstOrDefault(
+            s => string.Equals(s.ServerCallId, serverCallId, StringComparison.OrdinalIgnoreCase));
+        if (cached is not null)
+        {
+            return cached;
+        }
+
+        if (_sessionsTable is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var filter = $"PartitionKey eq '{SessionsPartitionKey}' and ServerCallId eq '{serverCallId}'";
+            var entity = _sessionsTable.Query<TableEntity>(filter, cancellationToken: cancellationToken).FirstOrDefault();
+            return entity is null ? null : await LoadSessionAsync(Guid.Parse(entity.RowKey), cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to query session by server call id {ServerCallId}", serverCallId);
+            return null;
+        }
+    }
+
     public async Task<CallSession?> FindPendingConnectionAsync(CancellationToken cancellationToken = default)
     {
         var cached = _sessions.Values.FirstOrDefault(
@@ -191,9 +220,27 @@ public class CallSessionStore
         return updated;
     }
 
-    public async Task<CallSession?> SetCallConnectionAsync(Guid callSessionId, string callConnectionId, CancellationToken cancellationToken = default)
+    public async Task<CallSession?> SetCallConnectionAsync(
+        Guid callSessionId,
+        string? callConnectionId,
+        string? serverCallId = null,
+        CancellationToken cancellationToken = default)
     {
-        return await UpdateAsync(callSessionId, existing => existing with { CallConnectionId = callConnectionId }, cancellationToken);
+        return await UpdateAsync(callSessionId, existing =>
+        {
+            var updatedConnectionId = string.IsNullOrWhiteSpace(callConnectionId)
+                ? existing.CallConnectionId
+                : callConnectionId;
+            var updatedServerCallId = string.IsNullOrWhiteSpace(serverCallId)
+                ? existing.ServerCallId
+                : serverCallId;
+
+            return existing with
+            {
+                CallConnectionId = updatedConnectionId,
+                ServerCallId = updatedServerCallId
+            };
+        }, cancellationToken);
     }
 
     public async Task<CallSession?> UpdateStatusAsync(Guid callSessionId, string status, DateTime? endedAtUtc = null, CancellationToken cancellationToken = default)
@@ -243,6 +290,7 @@ public class CallSessionStore
                 { "StartedByDemoUserId", session.StartedByDemoUserId },
                 { "Status", session.Status },
                 { "CallConnectionId", session.CallConnectionId ?? string.Empty },
+                { "ServerCallId", session.ServerCallId ?? string.Empty },
                 { "EndedAtUtc", session.EndedAtUtc },
                 { "TranscriptionStartedAtUtc", session.TranscriptionStartedAtUtc }
             };
@@ -307,6 +355,7 @@ public class CallSessionStore
                 sessionEntity.GetString("Status") ?? "Active",
                 participants,
                 sessionEntity.GetString("CallConnectionId"),
+                sessionEntity.GetString("ServerCallId"),
                 sessionEntity.GetDateTime("EndedAtUtc")?.ToUniversalTime(),
                 sessionEntity.GetDateTime("TranscriptionStartedAtUtc")?.ToUniversalTime());
 
@@ -381,6 +430,7 @@ public class CallSessionStore
                     entity.GetString("Status") ?? "Active",
                     participants,
                     entity.GetString("CallConnectionId"),
+                    entity.GetString("ServerCallId"),
                     entity.GetDateTime("EndedAtUtc")?.ToUniversalTime(),
                     entity.GetDateTime("TranscriptionStartedAtUtc")?.ToUniversalTime()));
             }

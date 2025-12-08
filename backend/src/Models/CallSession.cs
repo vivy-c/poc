@@ -8,6 +8,7 @@ public record CallSession(
     string Status,
     IReadOnlyList<CallParticipant> Participants,
     string? CallConnectionId = null,
+    string? ServerCallId = null,
     DateTime? EndedAtUtc = null,
     DateTime? TranscriptionStartedAtUtc = null)
 {

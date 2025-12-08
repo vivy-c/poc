@@ -16,6 +16,8 @@ public class CallsStartFunction
     private readonly DemoUserStore _demoUserStore;
     private readonly CallSessionStore _callSessionStore;
     private readonly AcsIdentityService _acsIdentityService;
+    private readonly AcsCallService _acsCallService;
+    private readonly AcsTranscriptionService _transcriptionService;
     private readonly ResponseFactory _responseFactory;
     private readonly ILogger _logger;
 
@@ -23,12 +25,16 @@ public class CallsStartFunction
         DemoUserStore demoUserStore,
         CallSessionStore callSessionStore,
         AcsIdentityService acsIdentityService,
+        AcsCallService acsCallService,
+        AcsTranscriptionService transcriptionService,
         ResponseFactory responseFactory,
         ILoggerFactory loggerFactory)
     {
         _demoUserStore = demoUserStore;
         _callSessionStore = callSessionStore;
         _acsIdentityService = acsIdentityService;
+        _acsCallService = acsCallService;
+        _transcriptionService = transcriptionService;
         _responseFactory = responseFactory;
         _logger = loggerFactory.CreateLogger<CallsStartFunction>();
     }
@@ -133,6 +139,32 @@ public class CallsStartFunction
             participants,
             callConnectionId: null,
             cancellationToken: req.FunctionContext.CancellationToken);
+
+        _logger.LogInformation(
+            "Started call session {CallSessionId} (acsGroupId={AcsGroupId}, initiator={InitiatorId}, participants={ParticipantCount})",
+            callSession.Id,
+            acsGroupId,
+            initiator.Id,
+            participants.Count);
+
+        var connection = await _acsCallService.TryEnsureCallConnectionAsync(
+            callSession.Id,
+            acsGroupId,
+            req.FunctionContext.CancellationToken);
+        if (connection.Success)
+        {
+            var updated = await _callSessionStore.SetCallConnectionAsync(
+                callSession.Id,
+                connection.CallConnectionId,
+                connection.ServerCallId,
+                req.FunctionContext.CancellationToken);
+            if (updated is not null)
+            {
+                callSession = updated;
+            }
+
+            _ = _transcriptionService.TryStartAsync(callSession, req.FunctionContext.CancellationToken);
+        }
 
         var payload = new
         {

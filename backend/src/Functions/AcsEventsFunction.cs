@@ -43,9 +43,9 @@ public class AcsEventsFunction
         _logger = loggerFactory.CreateLogger<AcsEventsFunction>();
     }
 
-    [Function("acs-events")]
+    [Function("call-events")]
     public async Task<HttpResponseData> RunAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "post", "options", Route = "acs/events")] HttpRequestData req)
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", "options", Route = "call-events")] HttpRequestData req)
     {
         if (string.Equals(req.Method, "OPTIONS", StringComparison.OrdinalIgnoreCase))
         {
@@ -100,7 +100,7 @@ public class AcsEventsFunction
 
         var ok = _responseFactory.CreateJson(
             req,
-            HttpStatusCode.Accepted,
+            HttpStatusCode.OK,
             new
             {
                 received = events.Count
@@ -144,7 +144,7 @@ public class AcsEventsFunction
                 if (pending is not null)
                 {
                     var resolvedId = pending.Id;
-                    await _callSessionStore.SetCallConnectionAsync(resolvedId, data.ServerCallId, cancellationToken);
+                    await _callSessionStore.SetCallConnectionAsync(resolvedId, null, data.ServerCallId, cancellationToken);
                     _logger.LogInformation(
                         "Mapped event {EventType} to pending session {CallSessionId} via serverCallId fallback",
                         evt.EventType,
@@ -160,17 +160,24 @@ public class AcsEventsFunction
             }
         }
 
+        var callSessionIdValue = callSessionId.Value;
+
         if (type.Contains("callconnected"))
         {
-            var connectionId = data?.CallConnectionId ?? data?.ServerCallId;
-            if (!string.IsNullOrWhiteSpace(connectionId))
+            var connectionId = data?.CallConnectionId;
+            var serverCallId = data?.ServerCallId;
+            _logger.LogInformation(
+                "Call connected: {CallId}", connectionId ?? serverCallId ?? callSessionId?.ToString());
+            var logCallId = connectionId ?? serverCallId ?? callSessionId?.ToString();
+            if (!string.IsNullOrWhiteSpace(connectionId) || !string.IsNullOrWhiteSpace(serverCallId))
             {
-                await _callSessionStore.SetCallConnectionAsync(callSessionId.Value, connectionId, cancellationToken);
+                await _callSessionStore.SetCallConnectionAsync(callSessionIdValue, connectionId, serverCallId, cancellationToken);
             }
 
-            await _callSessionStore.UpdateStatusAsync(callSessionId.Value, "Connected", cancellationToken: cancellationToken);
+            await _callSessionStore.UpdateStatusAsync(callSessionIdValue, "Connected", cancellationToken: cancellationToken);
+            _logger.LogInformation("Call connected: {CallId}", logCallId);
 
-            var latestSession = await _callSessionStore.GetAsync(callSessionId.Value, cancellationToken);
+            var latestSession = await _callSessionStore.GetAsync(callSessionIdValue, cancellationToken);
             if (latestSession is not null)
             {
                 await _transcriptionService.TryStartAsync(latestSession, cancellationToken);
@@ -182,52 +189,179 @@ public class AcsEventsFunction
             return;
         }
 
+        if (type.Contains("participantsupdated"))
+        {
+            if (callSessionId is not null
+                && (!string.IsNullOrWhiteSpace(data?.CallConnectionId) || !string.IsNullOrWhiteSpace(data?.ServerCallId)))
+            {
+                await _callSessionStore.SetCallConnectionAsync(
+                    callSessionIdValue,
+                    data?.CallConnectionId,
+                    data?.ServerCallId,
+                    cancellationToken);
+            }
+
+            if (callSessionId is not null)
+            {
+                var latestSession = callSession ?? await _callSessionStore.GetAsync(callSessionIdValue, cancellationToken);
+                if (latestSession is not null)
+                {
+                    var wasStarted = latestSession.TranscriptionStartedAtUtc is not null;
+                    var started = await _transcriptionService.TryStartAsync(latestSession, cancellationToken);
+                    if (started && !wasStarted)
+                    {
+                        _logger.LogInformation(
+                            "Transcription started from ParticipantsUpdated event for {CallSessionId}",
+                            latestSession.Id);
+                    }
+                }
+            }
+
+            return;
+        }
+
         if (type.Contains("callstarted") || type.Contains("callconnecting"))
         {
-            await _callSessionStore.UpdateStatusAsync(callSessionId.Value, "Connecting", cancellationToken: cancellationToken);
-            if (!string.IsNullOrWhiteSpace(data?.CallConnectionId))
+            await _callSessionStore.UpdateStatusAsync(callSessionIdValue, "Connecting", cancellationToken: cancellationToken);
+            if (!string.IsNullOrWhiteSpace(data?.CallConnectionId) || !string.IsNullOrWhiteSpace(data?.ServerCallId))
             {
-                await _callSessionStore.SetCallConnectionAsync(callSessionId.Value, data.CallConnectionId, cancellationToken);
+                await _callSessionStore.SetCallConnectionAsync(callSessionIdValue, data?.CallConnectionId, data?.ServerCallId, cancellationToken);
             }
             return;
         }
 
         if (type.Contains("callended") || type.Contains("calldisconnected"))
         {
-            await _callSessionStore.UpdateStatusAsync(callSessionId.Value, "Completed", DateTime.UtcNow, cancellationToken);
-            _logger.LogInformation("Call {CallSessionId} marked completed from ACS event", callSessionId);
-            var latestSession = await _callSessionStore.GetAsync(callSessionId.Value, cancellationToken);
+            await _callSessionStore.UpdateStatusAsync(callSessionIdValue, "Completed", DateTime.UtcNow, cancellationToken);
+            _logger.LogInformation(
+                "Call ended or disconnected: {CallId}",
+                data?.CallConnectionId ?? data?.ServerCallId ?? callSessionId?.ToString());
+            var latestSession = await _callSessionStore.GetAsync(callSessionIdValue, cancellationToken);
             if (latestSession is not null)
             {
                 _ = _transcriptionService.TryStopAsync(latestSession, CancellationToken.None);
             }
-            _ = _callSummaryService.EnsureSummaryAsync(callSessionId.Value, CancellationToken.None);
+            _ = _callSummaryService.EnsureSummaryAsync(callSessionIdValue, CancellationToken.None);
+            return;
+        }
+
+        if (type.Contains("callfailed"))
+        {
+            if (!string.IsNullOrWhiteSpace(data?.CallConnectionId) || !string.IsNullOrWhiteSpace(data?.ServerCallId))
+            {
+                await _callSessionStore.SetCallConnectionAsync(callSessionIdValue, data?.CallConnectionId, data?.ServerCallId, cancellationToken);
+            }
+
+            await _callSessionStore.UpdateStatusAsync(callSessionIdValue, "Failed", DateTime.UtcNow, cancellationToken);
+            _logger.LogWarning(
+                "Call failed: {CallId} (reason={Reason})",
+                data?.CallConnectionId ?? data?.ServerCallId ?? callSessionId?.ToString(),
+                FormatReason(data));
+            var latestSession = await _callSessionStore.GetAsync(callSessionIdValue, cancellationToken);
+            if (latestSession is not null)
+            {
+                _ = _transcriptionService.TryStopAsync(latestSession, CancellationToken.None);
+            }
+            _ = _callSummaryService.EnsureSummaryAsync(callSessionIdValue, CancellationToken.None);
+            return;
+        }
+
+        if (type.Contains("transcriptionfailed"))
+        {
+            await HandleTranscriptionFailureAsync(
+                callSessionIdValue,
+                callSession,
+                data,
+                evt.EventType ?? "Microsoft.Communication.TranscriptionFailed",
+                cancellationToken);
+            return;
+        }
+
+        if (type.Contains("transcriptionstarted"))
+        {
+            await HandleTranscriptionStartAsync(callSessionIdValue, cancellationToken);
+            return;
+        }
+
+        if (type.Contains("transcriptionupdated"))
+        {
+            await HandleTranscriptionEventAsync(
+                callSessionIdValue,
+                callSession,
+                data,
+                evt.EventType ?? "Microsoft.Communication.TranscriptionUpdated",
+                cancellationToken);
             return;
         }
 
         if (type.Contains("transcript") || type.Contains("transcription"))
         {
-            if (callSession is not null)
-            {
-                await _callSessionStore.MarkTranscriptionStartedAsync(callSession.Id, cancellationToken);
-            }
-
-            var segments = BuildSegments(callSessionId.Value, callSession, data).ToList();
-            if (segments.Count == 0)
-            {
-                _logger.LogDebug("Transcript event contained no text for {CallSessionId}", callSessionId);
-                return;
-            }
-
-            _transcriptStore.Add(callSessionId.Value, segments);
-            _logger.LogInformation(
-                "Persisted {SegmentCount} transcript segment(s) for call {CallSessionId}",
-                segments.Count,
-                callSessionId);
+            await HandleTranscriptionEventAsync(
+                callSessionIdValue,
+                callSession,
+                data,
+                evt.EventType ?? "transcription",
+                cancellationToken);
             return;
         }
 
         await Task.CompletedTask;
+    }
+
+    private async Task HandleTranscriptionStartAsync(Guid callSessionId, CancellationToken cancellationToken)
+    {
+        var updated = await _callSessionStore.MarkTranscriptionStartedAsync(callSessionId, cancellationToken);
+        _logger.LogInformation(
+            "Transcription started event received for call {CallSessionId} (sessionFound={SessionFound})",
+            callSessionId,
+            updated is not null);
+    }
+
+    private async Task HandleTranscriptionEventAsync(
+        Guid callSessionId,
+        CallSession? callSession,
+        AcsEventData? data,
+        string transcriptionEventType,
+        CancellationToken cancellationToken)
+    {
+        await _callSessionStore.MarkTranscriptionStartedAsync(callSessionId, cancellationToken);
+
+        var segments = BuildSegments(callSessionId, callSession, data).ToList();
+        if (segments.Count == 0)
+        {
+            _logger.LogDebug(
+                "{TranscriptionEvent} contained no text for {CallSessionId}",
+                transcriptionEventType,
+                callSessionId);
+            return;
+        }
+
+        _transcriptStore.Add(callSessionId, segments);
+        _logger.LogInformation(
+            "Persisted {SegmentCount} transcript segment(s) for call {CallSessionId} ({TranscriptionEvent})",
+            segments.Count,
+            callSessionId,
+            transcriptionEventType);
+    }
+
+    private async Task HandleTranscriptionFailureAsync(
+        Guid callSessionId,
+        CallSession? callSession,
+        AcsEventData? data,
+        string transcriptionEventType,
+        CancellationToken cancellationToken)
+    {
+        _logger.LogWarning(
+            "{TranscriptionEvent} received for call {CallSessionId} (reason={Reason})",
+            transcriptionEventType,
+            callSessionId,
+            FormatReason(data) ?? "unknown");
+
+        var latestSession = callSession ?? await _callSessionStore.GetAsync(callSessionId, cancellationToken);
+        if (latestSession is not null)
+        {
+            _ = _transcriptionService.TryStopAsync(latestSession, CancellationToken.None);
+        }
     }
 
     private async Task<Guid?> ResolveCallSessionIdAsync(AcsEventData? data, CancellationToken cancellationToken)
@@ -276,14 +410,32 @@ public class AcsEventsFunction
 
         if (!string.IsNullOrWhiteSpace(data.ServerCallId))
         {
-            var decoded = DecodeBase64Safe(data.ServerCallId);
-            var byServerId = await _callSessionStore.FindByCallConnectionIdAsync(data.ServerCallId, cancellationToken)
-                ?? (!string.IsNullOrWhiteSpace(decoded)
-                    ? await _callSessionStore.FindByCallConnectionIdAsync(decoded, cancellationToken)
-                    : null);
+            var paddedServerCallId = PadBase64(data.ServerCallId);
+            var decoded = DecodeBase64Safe(paddedServerCallId);
+
+            var byServerId = await _callSessionStore.FindByServerCallIdAsync(data.ServerCallId, cancellationToken);
             if (byServerId is not null)
             {
                 return byServerId.Id;
+            }
+
+            if (!string.Equals(paddedServerCallId, data.ServerCallId, StringComparison.Ordinal))
+            {
+                var byPadded = await _callSessionStore.FindByServerCallIdAsync(paddedServerCallId, cancellationToken);
+                if (byPadded is not null)
+                {
+                    return byPadded.Id;
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(decoded))
+            {
+                var byDecodedServerId = await _callSessionStore.FindByServerCallIdAsync(decoded, cancellationToken)
+                    ?? await _callSessionStore.FindByCallConnectionIdAsync(decoded, cancellationToken);
+                if (byDecodedServerId is not null)
+                {
+                    return byDecodedServerId.Id;
+                }
             }
         }
 
@@ -530,7 +682,7 @@ public class AcsEventsFunction
 
         try
         {
-            var padded = value.Length % 4 == 0 ? value : value.PadRight(value.Length + (4 - value.Length % 4), '=');
+            var padded = PadBase64(value);
             var bytes = Convert.FromBase64String(padded);
             return System.Text.Encoding.UTF8.GetString(bytes);
         }
@@ -538,6 +690,31 @@ public class AcsEventsFunction
         {
             return null;
         }
+    }
+
+    private static string PadBase64(string value)
+    {
+        return value.Length % 4 == 0 ? value : value.PadRight(value.Length + (4 - value.Length % 4), '=');
+    }
+
+    private static string? FormatReason(AcsEventData? data)
+    {
+        if (data is null)
+        {
+            return null;
+        }
+
+        if (data.Reason is JsonElement element)
+        {
+            if (element.ValueKind == JsonValueKind.String)
+            {
+                return element.GetString();
+            }
+
+            return element.ToString();
+        }
+
+        return data.Reason?.ToString() ?? data.Status;
     }
 
     private sealed class AcsEventData
@@ -549,7 +726,7 @@ public class AcsEventsFunction
         public string? ServerCallId { get; set; }
         public string? OperationContext { get; set; }
         public string? Status { get; set; }
-        public string? Reason { get; set; }
+        public object? Reason { get; set; }
         public string? ParticipantId { get; set; }
         public string? ParticipantDisplayName { get; set; }
         public string? SpeakerId { get; set; }

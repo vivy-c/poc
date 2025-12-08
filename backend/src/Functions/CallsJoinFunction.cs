@@ -17,6 +17,7 @@ public class CallsJoinFunction
     private readonly CallSessionStore _callSessionStore;
     private readonly AcsIdentityService _acsIdentityService;
     private readonly AcsCallService _acsCallService;
+    private readonly AcsTranscriptionService _transcriptionService;
     private readonly ResponseFactory _responseFactory;
     private readonly ILogger _logger;
 
@@ -25,6 +26,7 @@ public class CallsJoinFunction
         CallSessionStore callSessionStore,
         AcsIdentityService acsIdentityService,
         AcsCallService acsCallService,
+        AcsTranscriptionService transcriptionService,
         ResponseFactory responseFactory,
         ILoggerFactory loggerFactory)
     {
@@ -32,6 +34,7 @@ public class CallsJoinFunction
         _callSessionStore = callSessionStore;
         _acsIdentityService = acsIdentityService;
         _acsCallService = acsCallService;
+        _transcriptionService = transcriptionService;
         _responseFactory = responseFactory;
         _logger = loggerFactory.CreateLogger<CallsJoinFunction>();
     }
@@ -80,6 +83,26 @@ public class CallsJoinFunction
                 new { error = "Call session not found." });
             notFound.Headers.Add("Access-Control-Allow-Origin", "*");
             return notFound;
+        }
+
+        if (string.IsNullOrWhiteSpace(session.CallConnectionId))
+        {
+            var connection = await _acsCallService.TryEnsureCallConnectionAsync(
+                session.Id,
+                session.AcsGroupId,
+                req.FunctionContext.CancellationToken);
+            if (connection.Success)
+            {
+                var sessionWithConnection = await _callSessionStore.SetCallConnectionAsync(
+                    session.Id,
+                    connection.CallConnectionId,
+                    connection.ServerCallId,
+                    req.FunctionContext.CancellationToken);
+                if (sessionWithConnection is not null)
+                {
+                    session = sessionWithConnection;
+                }
+            }
         }
 
         var demoUser = _demoUserStore.GetById(request.DemoUserId);
@@ -150,6 +173,11 @@ public class CallsJoinFunction
             updated.CallConnectionId,
             participant,
             req.FunctionContext.CancellationToken);
+
+        if (!string.IsNullOrWhiteSpace(updated.CallConnectionId))
+        {
+            _ = _transcriptionService.TryStartAsync(updated, req.FunctionContext.CancellationToken);
+        }
 
         var payload = new
         {

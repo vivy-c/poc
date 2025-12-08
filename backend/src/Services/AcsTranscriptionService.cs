@@ -48,7 +48,7 @@ public class AcsTranscriptionService
         if (!string.IsNullOrWhiteSpace(webhook.PublicBaseUrl))
         {
             var baseUrl = webhook.PublicBaseUrl.TrimEnd('/');
-            if (Uri.TryCreate($"{baseUrl}/api/acs/events", UriKind.Absolute, out var uri))
+            if (Uri.TryCreate($"{baseUrl}/api/call-events", UriKind.Absolute, out var uri))
             {
                 _callbackUri = uri;
             }
