@@ -222,10 +222,17 @@ public class AcsEventsFunction
 
         if (type.Contains("callstarted") || type.Contains("callconnecting"))
         {
-            await _callSessionStore.UpdateStatusAsync(callSessionIdValue, "Connecting", cancellationToken: cancellationToken);
             if (!string.IsNullOrWhiteSpace(data?.CallConnectionId) || !string.IsNullOrWhiteSpace(data?.ServerCallId))
             {
                 await _callSessionStore.SetCallConnectionAsync(callSessionIdValue, data?.CallConnectionId, data?.ServerCallId, cancellationToken);
+            }
+            var latest = callSession ?? await _callSessionStore.GetAsync(callSessionIdValue, cancellationToken);
+            var currentStatus = latest?.Status ?? string.Empty;
+            if (!string.Equals(currentStatus, "Connected", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(currentStatus, "Completed", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(currentStatus, "Failed", StringComparison.OrdinalIgnoreCase))
+            {
+                await _callSessionStore.UpdateStatusAsync(callSessionIdValue, "Connecting", cancellationToken: cancellationToken);
             }
             return;
         }
@@ -352,10 +359,15 @@ public class AcsEventsFunction
         CancellationToken cancellationToken)
     {
         _logger.LogWarning(
-            "{TranscriptionEvent} received for call {CallSessionId} (reason={Reason})",
+            "{TranscriptionEvent} received for call {CallSessionId} (reason={Reason}, code={Code}, subcode={Subcode}, callConnectionId={CallConnectionId}, serverCallId={ServerCallId}, locale={Locale})",
             transcriptionEventType,
             callSessionId,
-            FormatReason(data) ?? "unknown");
+            FormatReason(data) ?? "unknown",
+            data?.ResultInformation?.Code ?? data?.Code,
+            data?.ResultInformation?.Subcode ?? data?.Subcode,
+            data?.CallConnectionId,
+            data?.ServerCallId,
+            data);
 
         var latestSession = callSession ?? await _callSessionStore.GetAsync(callSessionId, cancellationToken);
         if (latestSession is not null)
@@ -483,6 +495,10 @@ public class AcsEventsFunction
         var duration = source?.DurationSeconds ?? source?.Duration ?? fallback.DurationSeconds ?? fallback.Duration;
         var speakerAcsId = source?.SpeakerId ?? fallback.SpeakerId ?? fallback.ParticipantId;
         var speakerName = source?.SpeakerDisplayName ?? fallback.SpeakerDisplayName ?? fallback.ParticipantDisplayName;
+        var confidence = source?.Confidence ?? fallback.Confidence;
+        var resultStatus = source?.ResultStatus ?? fallback.ResultStatus;
+        var sentiment = source?.SentimentAnalysisResult?.Sentiment ?? fallback.SentimentAnalysisResult?.Sentiment;
+        var language = source?.LanguageIdentified ?? fallback.LanguageIdentified ?? source?.Locale ?? fallback.Locale;
 
         string? speakerDemoUserId = null;
         string? resolvedDisplayName = speakerName;
@@ -520,7 +536,11 @@ public class AcsEventsFunction
             offset,
             duration,
             DateTimeOffset.UtcNow,
-            Source: fallback.Locale ?? source?.Locale ?? "acs");
+            Source: fallback.Locale ?? source?.Locale ?? "acs",
+            Confidence: confidence,
+            Sentiment: sentiment,
+            Language: language,
+            ResultStatus: resultStatus ?? ((source?.IsFinal ?? fallback.IsFinal) == true ? "Final" : null));
     }
 
     private static IEnumerable<IncomingEvent> ParseEvents(JsonElement root)
@@ -704,6 +724,23 @@ public class AcsEventsFunction
             return null;
         }
 
+        if (data.ResultInformation is not null)
+        {
+            var ri = data.ResultInformation;
+            var code = ri.Code?.ToString() ?? data.Code?.ToString();
+            var subcode = ri.Subcode?.ToString() ?? data.Subcode?.ToString();
+            var msg = ri.Message ?? data.Status ?? data.Reason?.ToString();
+            if (!string.IsNullOrWhiteSpace(code) || !string.IsNullOrWhiteSpace(subcode))
+            {
+                return $"code={code}, subcode={subcode}, message={msg}";
+            }
+        }
+
+        if (data.Code is not null || data.Subcode is not null)
+        {
+            return $"code={data.Code}, subcode={data.Subcode}, message={data.Reason ?? data.Status}";
+        }
+
         if (data.Reason is JsonElement element)
         {
             if (element.ValueKind == JsonValueKind.String)
@@ -727,6 +764,9 @@ public class AcsEventsFunction
         public string? OperationContext { get; set; }
         public string? Status { get; set; }
         public object? Reason { get; set; }
+        public int? Code { get; set; }
+        public int? Subcode { get; set; }
+        public AcsResultInformation? ResultInformation { get; set; }
         public string? ParticipantId { get; set; }
         public string? ParticipantDisplayName { get; set; }
         public string? SpeakerId { get; set; }
@@ -739,6 +779,10 @@ public class AcsEventsFunction
         public double? DurationSeconds { get; set; }
         public bool? IsFinal { get; set; }
         public string? ValidationCode { get; set; }
+        public double? Confidence { get; set; }
+        public string? ResultStatus { get; set; }
+        public AcsSentimentResult? SentimentAnalysisResult { get; set; }
+        public string? LanguageIdentified { get; set; }
         public IEnumerable<AcsTranscriptionData>? Segments { get; set; }
         public AcsTranscriptionData? Transcription { get; set; }
     }
@@ -754,5 +798,29 @@ public class AcsEventsFunction
         public double? DurationSeconds { get; set; }
         public bool? IsFinal { get; set; }
         public string? Locale { get; set; }
+        public double? Confidence { get; set; }
+        public string? ResultStatus { get; set; }
+        public AcsSentimentResult? SentimentAnalysisResult { get; set; }
+        public string? LanguageIdentified { get; set; }
+        public AcsTranscriptionWord[]? Words { get; set; }
+    }
+
+    private sealed class AcsSentimentResult
+    {
+        public string? Sentiment { get; set; }
+    }
+
+    private sealed class AcsResultInformation
+    {
+        public int? Code { get; set; }
+        public int? Subcode { get; set; }
+        public string? Message { get; set; }
+    }
+
+    private sealed class AcsTranscriptionWord
+    {
+        public string? Text { get; set; }
+        public double? Offset { get; set; }
+        public double? Duration { get; set; }
     }
 }

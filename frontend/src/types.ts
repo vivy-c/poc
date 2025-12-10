@@ -40,6 +40,10 @@ export type TranscriptSegment = {
   durationSeconds?: number | null;
   createdAtUtc: string;
   source?: string | null;
+  confidence?: number | null;
+  sentiment?: string | null;
+  language?: string | null;
+  resultStatus?: string | null;
 };
 
 export type TranscriptResponse = {

@@ -29,6 +29,8 @@ var host = new HostBuilder()
         services.Configure<SpeechOptions>(context.Configuration.GetSection("Speech"));
         services.Configure<WebhookAuthOptions>(context.Configuration.GetSection("Webhook"));
         services.Configure<FeatureFlagsOptions>(context.Configuration.GetSection("Features"));
+        services.AddSingleton<WebSocketTranscriptionService>();
+        services.AddHostedService(sp => sp.GetRequiredService<WebSocketTranscriptionService>());
     })
     .Build();
 

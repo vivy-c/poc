@@ -15,8 +15,17 @@ public class AcsCallService
     private readonly Uri? _callbackUri;
     private readonly string _transcriptionLocale;
     private readonly bool _transcriptionEnabled;
+    private readonly string _speechEndpoint;
     private readonly string _speechRegion;
     private readonly bool _speechConfigured;
+    private readonly bool _startTranscriptionOnConnect;
+    private readonly bool _enableIntermediateResults;
+    private readonly string? _speechModelEndpointId;
+    private readonly IList<string>? _languageIdLocales;
+    private readonly bool _sentimentEnabled;
+    private readonly PiiRedactionOptions? _piiOptions;
+    private readonly SummarizationOptions? _summarizationOptions;
+    private readonly Uri? _transportUriOverride;
 
     public AcsCallService(
         IOptions<AcsOptions> options,
@@ -37,8 +46,20 @@ public class AcsCallService
         var speech = speechOptions.Value;
         _transcriptionLocale = string.IsNullOrWhiteSpace(speech.Locale) ? "en-US" : speech.Locale;
         _transcriptionEnabled = featureFlags.Value.EnableTranscription;
+        _speechEndpoint = speech.Endpoint ?? string.Empty;
         _speechRegion = speech.Region ?? string.Empty;
-        _speechConfigured = !string.IsNullOrWhiteSpace(speech.Key) && !string.IsNullOrWhiteSpace(_speechRegion);
+        _speechConfigured = !string.IsNullOrWhiteSpace(speech.Key)
+            && (!string.IsNullOrWhiteSpace(_speechEndpoint) || !string.IsNullOrWhiteSpace(_speechRegion));
+        _startTranscriptionOnConnect = speech.StartTranscriptionOnConnect;
+        _enableIntermediateResults = speech.EnableIntermediateResults;
+        _speechModelEndpointId = string.IsNullOrWhiteSpace(speech.SpeechRecognitionModelEndpointId)
+            ? null
+            : speech.SpeechRecognitionModelEndpointId;
+        _languageIdLocales = ParseLocales(speech);
+        _sentimentEnabled = speech.EnableSentimentAnalysis;
+        _piiOptions = BuildPiiOptions(speech);
+        _summarizationOptions = BuildSummarizationOptions(speech);
+        _transportUriOverride = TryResolveCustomTransportUri(speech.TransportUri);
 
         var webhook = webhookOptions.Value;
         if (!string.IsNullOrWhiteSpace(webhook.PublicBaseUrl))
@@ -127,18 +148,43 @@ public class AcsCallService
 
             if (_transcriptionEnabled && _speechConfigured)
             {
-                var transportUrl = new Uri($"wss://{_speechRegion}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language={_transcriptionLocale}");
+                var transportUrl = ResolveTransportUri();
                 connectOptions.TranscriptionOptions = new TranscriptionOptions(_transcriptionLocale, StreamingTransport.Websocket)
                 {
-                    StartTranscription = false,
-                    TransportUri = transportUrl
+                    StartTranscription = _startTranscriptionOnConnect,
+                    TransportUri = transportUrl,
+                    EnableIntermediateResults = _enableIntermediateResults,
+                    SpeechRecognitionModelEndpointId = _speechModelEndpointId,
+                    IsSentimentAnalysisEnabled = _sentimentEnabled,
+                    PiiRedactionOptions = _piiOptions,
+                    SummarizationOptions = _summarizationOptions
                 };
 
-                var cognitiveServicesEndpoint = new Uri($"https://{_speechRegion}.api.cognitive.microsoft.com");
-                connectOptions.CallIntelligenceOptions = new CallIntelligenceOptions
+                if (_languageIdLocales is { Count: > 0 })
                 {
-                    CognitiveServicesEndpoint = cognitiveServicesEndpoint
-                };
+                    connectOptions.TranscriptionOptions.Locales = _languageIdLocales;
+                }
+
+                var cognitiveServicesEndpoint = ResolveCognitiveServicesEndpoint();
+                if (cognitiveServicesEndpoint is not null)
+                {
+                    if (string.IsNullOrWhiteSpace(_speechEndpoint))
+                    {
+                        _logger.LogWarning(
+                            "Speech__Endpoint not set; falling back to region-based endpoint {Endpoint}. Prefer setting Speech__Endpoint to your Speech resource endpoint (e.g. https://<resource>.cognitiveservices.azure.com) to avoid Cognitive Services bad request errors.",
+                            cognitiveServicesEndpoint);
+                    }
+
+                    connectOptions.CallIntelligenceOptions = new CallIntelligenceOptions
+                    {
+                        CognitiveServicesEndpoint = cognitiveServicesEndpoint
+                    };
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "Speech endpoint not configured; skipping CallIntelligenceOptions. Transcription will fail until Speech__Endpoint (preferred) or Speech__Region is set to a valid Speech resource endpoint.");
+                }
             }
 
             var response = await _callAutomationClient.ConnectCallAsync(connectOptions, cancellationToken);
@@ -169,5 +215,109 @@ public class AcsCallService
                 acsGroupId);
             return (false, null, null);
         }
+    }
+
+    private Uri ResolveTransportUri()
+    {
+        if (_transportUriOverride is not null)
+        {
+            return _transportUriOverride;
+        }
+
+        var defaultUrl =
+            $"wss://{_speechRegion}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language={_transcriptionLocale}";
+        return new Uri(defaultUrl);
+    }
+
+    private Uri? ResolveCognitiveServicesEndpoint()
+    {
+        if (!string.IsNullOrWhiteSpace(_speechEndpoint)
+            && Uri.TryCreate(_speechEndpoint.Trim(), UriKind.Absolute, out var explicitEndpoint))
+        {
+            return explicitEndpoint;
+        }
+
+        if (!string.IsNullOrWhiteSpace(_speechRegion))
+        {
+            var fallback = $"https://{_speechRegion}.api.cognitive.microsoft.com";
+            if (Uri.TryCreate(fallback, UriKind.Absolute, out var fallbackUri))
+            {
+                return fallbackUri;
+            }
+        }
+
+        return null;
+    }
+
+    private static PiiRedactionOptions? BuildPiiOptions(SpeechOptions speech)
+    {
+        if (!speech.EnablePiiRedaction)
+        {
+            return null;
+        }
+
+        var options = new PiiRedactionOptions
+        {
+            IsEnabled = true
+        };
+
+        if (!string.IsNullOrWhiteSpace(speech.PiiRedactionType))
+        {
+            options.RedactionType = speech.PiiRedactionType;
+        }
+
+        return options;
+    }
+
+    private static IList<string>? ParseLocales(SpeechOptions speech)
+    {
+        if (speech.Locales is { Count: > 0 })
+        {
+            return speech.Locales.Where(l => !string.IsNullOrWhiteSpace(l)).Select(l => l.Trim()).ToList();
+        }
+
+        if (string.IsNullOrWhiteSpace(speech.LocalesCsv))
+        {
+            return null;
+        }
+
+        return speech.LocalesCsv
+            .Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(l => l.Trim())
+            .Where(l => !string.IsNullOrWhiteSpace(l))
+            .ToList();
+    }
+
+    private static SummarizationOptions? BuildSummarizationOptions(SpeechOptions speech)
+    {
+        if (!speech.EnableSummarization)
+        {
+            return null;
+        }
+
+        var options = new SummarizationOptions
+        {
+            IsEndCallSummaryEnabled = true,
+            Locale = string.IsNullOrWhiteSpace(speech.SummarizationLocale)
+                ? (string.IsNullOrWhiteSpace(speech.Locale) ? "en-US" : speech.Locale)
+                : speech.SummarizationLocale
+        };
+
+        return options;
+    }
+
+    private static Uri? TryResolveCustomTransportUri(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return null;
+        }
+
+        if (Uri.TryCreate(raw.Trim(), UriKind.Absolute, out var uri))
+        {
+            return uri;
+        }
+
+        return null;
     }
 }

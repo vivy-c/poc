@@ -987,8 +987,8 @@ function SummaryView({
               </div>
               <span
                 className={`rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.08em] ${summaryStatus === 'ready'
-                    ? 'bg-emerald-500/20 text-emerald-200'
-                    : 'bg-amber-400/20 text-amber-100'
+                  ? 'bg-emerald-500/20 text-emerald-200'
+                  : 'bg-amber-400/20 text-amber-100'
                   }`}
               >
                 {summaryStatus === 'ready' ? 'Ready' : 'Pending'}
