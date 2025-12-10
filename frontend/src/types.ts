@@ -8,11 +8,14 @@ export type CallParticipant = {
 export type StartCallResponse = {
   callSessionId: string;
   acsGroupId: string;
+  callConnectionId?: string | null;
   acsToken: string;
   acsIdentity: string;
   acsTokenExpiresOn?: string;
   participants?: CallParticipant[];
 };
+
+export type JoinCallResponse = StartCallResponse;
 
 export type AddParticipantsResponse = {
   callSessionId: string;
@@ -37,6 +40,10 @@ export type TranscriptSegment = {
   durationSeconds?: number | null;
   createdAtUtc: string;
   source?: string | null;
+  confidence?: number | null;
+  sentiment?: string | null;
+  language?: string | null;
+  resultStatus?: string | null;
 };
 
 export type TranscriptResponse = {
@@ -45,7 +52,27 @@ export type TranscriptResponse = {
   startedAtUtc: string;
   endedAtUtc?: string | null;
   transcriptionStartedAtUtc?: string | null;
+  startedByDemoUserId?: string | null;
   acsGroupId: string;
   callConnectionId?: string | null;
+  participants?: CallParticipant[];
   segments: TranscriptSegment[];
+};
+
+export type CallSummaryResponse = {
+  callSessionId: string;
+  status: string;
+  startedAtUtc: string;
+  endedAtUtc?: string | null;
+  transcriptionStartedAtUtc?: string | null;
+  startedByDemoUserId?: string | null;
+  acsGroupId: string;
+  callConnectionId?: string | null;
+  participants: CallParticipant[];
+  summaryStatus: 'ready' | 'pending' | 'failed';
+  summary?: string | null;
+  keyPoints: string[];
+  actionItems: string[];
+  summaryGeneratedAtUtc?: string | null;
+  summarySource?: string | null;
 };

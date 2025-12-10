@@ -1,16 +1,18 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './index.css';
 import {
   AzureCommunicationTokenCredential,
   CallComposite,
   useAzureCommunicationCallAdapter,
+  type AdapterError,
   type AzureCommunicationCallAdapterArgs,
   type CallAdapter
 } from './acsClient';
-import { addParticipants, getTranscript, initDemoUser, startCall } from './api';
+import { addParticipants, getSummary, getTranscript, initDemoUser, joinCall, startCall } from './api';
 import { DEMO_USERS, type DemoUser } from './demoUsers';
 import type {
   CallParticipant,
+  CallSummaryResponse,
   StartCallResponse,
   TranscriptResponse,
   TranscriptSegment
@@ -19,8 +21,10 @@ import type {
 type CallBootstrapState = {
   callSessionId: string;
   acsGroupId: string;
+  callConnectionId?: string | null;
   acsToken: string;
   acsIdentity: string;
+  acsTokenExpiresOn?: string;
   displayName: string;
   participants: CallParticipant[];
 };
@@ -28,9 +32,138 @@ type CallBootstrapState = {
 type ViewMode = 'call' | 'summary';
 
 const LOCAL_STORAGE_KEY = 'call-demo-user';
+const AUTO_JOIN_STORAGE_KEY = 'call-auto-join';
+const AUTO_JOIN_TTL_MS = 1000 * 60 * 60 * 12; // 12 hours
+const CALL_SESSION_ID_PATTERN =
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+type AutoJoinIntent = {
+  demoUserId: string;
+  createdAt: number;
+};
+
+function parseCallSessionIdFromPath(): string | null {
+  if (typeof window === 'undefined') return null;
+  const segment = window.location.pathname.replace(/^\//, '').split('/')[0];
+  if (!segment || !CALL_SESSION_ID_PATTERN.test(segment)) {
+    return null;
+  }
+  return segment;
+}
+
+function readAutoJoinStore(): Record<string, AutoJoinIntent> {
+  if (typeof window === 'undefined') return {};
+  const raw = localStorage.getItem(AUTO_JOIN_STORAGE_KEY);
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw) as Record<string, AutoJoinIntent>;
+    return parsed ?? {};
+  } catch {
+    localStorage.removeItem(AUTO_JOIN_STORAGE_KEY);
+    return {};
+  }
+}
+
+function persistAutoJoinStore(store: Record<string, AutoJoinIntent>) {
+  if (typeof window === 'undefined') return;
+  localStorage.setItem(AUTO_JOIN_STORAGE_KEY, JSON.stringify(store));
+}
+
+function getAutoJoinIntent(callSessionId: string | null): AutoJoinIntent | null {
+  if (!callSessionId) return null;
+  const store = readAutoJoinStore();
+  const intent = store[callSessionId];
+  if (!intent) return null;
+  const isExpired = Date.now() - intent.createdAt > AUTO_JOIN_TTL_MS;
+  if (isExpired) {
+    delete store[callSessionId];
+    persistAutoJoinStore(store);
+    return null;
+  }
+  return intent;
+}
+
+function setAutoJoinIntent(callSessionId: string, demoUserId: string) {
+  if (typeof window === 'undefined') return;
+  const store = readAutoJoinStore();
+  store[callSessionId] = { demoUserId, createdAt: Date.now() };
+  persistAutoJoinStore(store);
+}
+
+function buildCallUrl(callSessionId: string) {
+  if (typeof window === 'undefined') {
+    return `/${callSessionId}`;
+  }
+  const url = new URL(window.location.href);
+  url.pathname = `/${callSessionId}`;
+  url.search = '';
+  url.hash = '';
+  return url.toString();
+}
+
+function openAutoJoinWindow(callSessionId: string, pendingWindow: Window | null) {
+  if (typeof window === 'undefined') return;
+
+  const callUrl = buildCallUrl(callSessionId);
+  const targetWindow =
+    pendingWindow && !pendingWindow.closed ? pendingWindow : window.open('', '_blank');
+
+  if (!targetWindow) {
+    window.open(callUrl, '_blank');
+    return;
+  }
+
+  try {
+    const doc = targetWindow.document;
+    doc.open();
+    doc.write(
+      `<div style="font-family: system-ui, -apple-system, sans-serif; padding: 16px;">
+        <p>Launching call window...</p>
+        <p><a href="${callUrl}" target="_self" rel="noreferrer">Click here if you are not redirected automatically.</a></p>
+      </div>`
+    );
+    doc.close();
+  } catch {
+    // ignore fallback rendering issues; navigation below will still be attempted
+  }
+
+  targetWindow.opener = null;
+
+  try {
+    targetWindow.location.replace(callUrl);
+  } catch {
+    targetWindow.location.href = callUrl;
+  }
+  targetWindow.focus();
+}
+
+function resolveInitialDemoUserId(
+  _pathCallSessionId: string | null,
+  autoJoinIntent: AutoJoinIntent | null
+) {
+  if (autoJoinIntent?.demoUserId) {
+    return autoJoinIntent.demoUserId;
+  }
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  const stored = localStorage.getItem(LOCAL_STORAGE_KEY);
+  if (!stored) return null;
+  try {
+    const parsed = JSON.parse(stored) as { demoUserId?: string };
+    return parsed.demoUserId ?? null;
+  } catch {
+    localStorage.removeItem(LOCAL_STORAGE_KEY);
+    return null;
+  }
+}
 
 function App() {
-  const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
+  const pathCallSessionId = parseCallSessionIdFromPath();
+  const initialAutoJoinIntent = getAutoJoinIntent(pathCallSessionId);
+  const [selectedUserId, setSelectedUserId] = useState<string | null>(() =>
+    resolveInitialDemoUserId(pathCallSessionId, initialAutoJoinIntent)
+  );
   const [preCallParticipantIds, setPreCallParticipantIds] = useState<string[]>([]);
   const [callParticipants, setCallParticipants] = useState<CallParticipant[]>([]);
   const [inviteSelection, setInviteSelection] = useState<string[]>([]);
@@ -40,23 +173,19 @@ function App() {
   const [addInFlight, setAddInFlight] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [addError, setAddError] = useState<string | null>(null);
+  const [adapterError, setAdapterError] = useState<string | null>(null);
   const [transcriptSegments, setTranscriptSegments] = useState<TranscriptSegment[]>([]);
   const [transcriptLoading, setTranscriptLoading] = useState(false);
   const [transcriptError, setTranscriptError] = useState<string | null>(null);
-
-  useEffect(() => {
-    const stored = localStorage.getItem(LOCAL_STORAGE_KEY);
-    if (stored) {
-      try {
-        const parsed = JSON.parse(stored) as { demoUserId?: string };
-        if (parsed.demoUserId) {
-          setSelectedUserId(parsed.demoUserId);
-        }
-      } catch {
-        localStorage.removeItem(LOCAL_STORAGE_KEY);
-      }
-    }
-  }, []);
+  const [inCall, setInCall] = useState(false);
+  const [callSummary, setCallSummary] = useState<CallSummaryResponse | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
+  const [summaryError, setSummaryError] = useState<string | null>(null);
+  const [joinSessionId, setJoinSessionId] = useState(pathCallSessionId ?? '');
+  const [joinInFlight, setJoinInFlight] = useState(false);
+  const [joinError, setJoinError] = useState<string | null>(null);
+  const [autoJoinIntent] = useState<AutoJoinIntent | null>(initialAutoJoinIntent);
+  const autoJoinTriggeredRef = useRef(false);
 
   useEffect(() => {
     if (!selectedUserId) {
@@ -66,10 +195,17 @@ function App() {
       setInviteSelection([]);
       setError(null);
       setAddError(null);
+      setAdapterError(null);
       setTranscriptSegments([]);
       setTranscriptError(null);
       setTranscriptLoading(false);
+      setCallSummary(null);
+      setSummaryError(null);
+      setSummaryLoading(false);
       setView('call');
+      setJoinSessionId(pathCallSessionId ?? '');
+      setJoinError(null);
+      setJoinInFlight(false);
       localStorage.removeItem(LOCAL_STORAGE_KEY);
       return;
     }
@@ -84,31 +220,60 @@ function App() {
     setInviteSelection([]);
     setError(null);
     setAddError(null);
+    setAdapterError(null);
     setTranscriptSegments([]);
     setTranscriptError(null);
     setTranscriptLoading(false);
+    setCallSummary(null);
+    setSummaryError(null);
+    setSummaryLoading(false);
     setView('call');
-  }, [selectedUserId]);
+    setJoinSessionId(pathCallSessionId ?? '');
+    setJoinError(null);
+    setJoinInFlight(false);
+  }, [selectedUserId, pathCallSessionId]);
 
   const selectedUser = selectedUserId
     ? DEMO_USERS.find((user) => user.id === selectedUserId) ?? null
     : null;
 
   const callAdapterArgs = useMemo<AzureCommunicationCallAdapterArgs | undefined>(() => {
-    if (!callInfo || !selectedUser) return undefined;
+    if (!callInfo || !selectedUser || view !== 'call' || !callInfo.acsToken) return undefined;
     return {
       userId: { communicationUserId: callInfo.acsIdentity },
       displayName: selectedUser.displayName,
       credential: new AzureCommunicationTokenCredential(callInfo.acsToken),
       locator: { groupId: callInfo.acsGroupId }
     };
-  }, [callInfo, selectedUser]);
+  }, [callInfo, selectedUser, view]);
 
-  const callAdapter = useAzureCommunicationCallAdapter(callAdapterArgs);
+  const callAdapter = useAzureCommunicationCallAdapter(callAdapterArgs, (error) => {
+    setAdapterError(error.message || 'Unable to initialize call adapter.');
+  });
 
   useEffect(() => {
+    if (!callAdapter) return;
+
+    setAdapterError(null);
+    const updateInCall = () => {
+      const state = callAdapter.getState();
+      const callState = state?.call?.state;
+      const active = callState === 'Connected' || callState === 'Connecting';
+      setInCall(active);
+    };
+    updateInCall();
+
+    const onError = (event: AdapterError) => {
+      console.error('ACS adapter error', event);
+      const message = event?.message ?? 'Unexpected adapter error.';
+      setAdapterError(message);
+    };
+
+    callAdapter.onStateChange?.(updateInCall);
+    callAdapter.on('error', onError);
     return () => {
-      callAdapter?.dispose();
+      callAdapter.offStateChange?.(updateInCall);
+      callAdapter.off('error', onError);
     };
   }, [callAdapter]);
 
@@ -152,23 +317,71 @@ function App() {
     [callSessionId]
   );
 
+  const refreshSummary = useCallback(
+    async (options?: { silent?: boolean }) => {
+      if (!callSessionId) return;
+      if (!options?.silent) {
+        setSummaryLoading(true);
+      }
+      try {
+        const response = (await getSummary(callSessionId)) as CallSummaryResponse;
+        setCallSummary(response);
+        setSummaryError(null);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Unable to fetch summary.';
+        setSummaryError(message);
+      } finally {
+        if (!options?.silent) {
+          setSummaryLoading(false);
+        }
+      }
+    },
+    [callSessionId]
+  );
+
   useEffect(() => {
-    if (!callSessionId || view !== 'call') return;
+    if (!callSessionId || view !== 'call' || !inCall) return;
     refreshTranscript({ silent: true });
     const interval = window.setInterval(() => {
       refreshTranscript({ silent: true });
     }, 3500);
     return () => window.clearInterval(interval);
-  }, [callSessionId, view, refreshTranscript]);
+  }, [callSessionId, view, refreshTranscript, inCall]);
+
+  useEffect(() => {
+    if (!callSessionId || view !== 'summary') return;
+    refreshSummary({ silent: true });
+  }, [callSessionId, view, refreshSummary]);
+
+  useEffect(() => {
+    if (!callSessionId || view !== 'summary') return;
+    if (callSummary?.summaryStatus === 'ready') return;
+    const interval = window.setInterval(() => {
+      refreshSummary({ silent: true });
+    }, 4000);
+    return () => window.clearInterval(interval);
+  }, [callSessionId, view, callSummary?.summaryStatus, refreshSummary]);
 
   const handleStartCall = async () => {
     if (!selectedUser) return;
+    const hasPreselectedParticipant = preCallParticipantIds.some(
+      (id) => id !== selectedUser.id
+    );
+    const pendingAutoJoinWindow =
+      hasPreselectedParticipant && typeof window !== 'undefined'
+        ? window.open('', '_blank')
+        : null;
     setError(null);
     setAddError(null);
+    setAdapterError(null);
     setTranscriptSegments([]);
     setTranscriptError(null);
+    setCallSummary(null);
+    setSummaryError(null);
+    setSummaryLoading(false);
     setView('call');
     setStartInFlight(true);
+    setJoinError(null);
 
     try {
       const initResponse = await initDemoUser(selectedUser.id);
@@ -186,13 +399,76 @@ function App() {
       setCallInfo(bootstrap);
       setCallParticipants(bootstrap.participants);
       setInviteSelection([]);
+
+      const autoJoinTarget = bootstrap.participants.find(
+        (participant) => participant.demoUserId !== selectedUser.id
+      );
+      if (autoJoinTarget) {
+        setAutoJoinIntent(bootstrap.callSessionId, autoJoinTarget.demoUserId);
+        openAutoJoinWindow(bootstrap.callSessionId, pendingAutoJoinWindow);
+      } else if (pendingAutoJoinWindow && !pendingAutoJoinWindow.closed) {
+        pendingAutoJoinWindow.close();
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to start call.';
       setError(message);
+      if (pendingAutoJoinWindow && !pendingAutoJoinWindow.closed) {
+        pendingAutoJoinWindow.close();
+      }
     } finally {
       setStartInFlight(false);
     }
   };
+
+  const handleJoinCall = useCallback(async () => {
+    if (!selectedUser || !joinSessionId.trim()) return;
+    const trimmedSessionId = joinSessionId.trim();
+    setError(null);
+    setAddError(null);
+    setAdapterError(null);
+    setJoinError(null);
+    setTranscriptSegments([]);
+    setTranscriptError(null);
+    setCallSummary(null);
+    setSummaryError(null);
+    setSummaryLoading(false);
+    setView('call');
+    setJoinInFlight(true);
+
+    try {
+      const initResponse = await initDemoUser(selectedUser.id);
+      const response = await joinCall(trimmedSessionId, selectedUser.id);
+      const bootstrap = transformCallStart(response, selectedUser, initResponse.acsIdentity);
+      setCallInfo(bootstrap);
+      setCallParticipants(bootstrap.participants);
+      setInviteSelection([]);
+    }
+    catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to join call.';
+      setJoinError(message);
+    }
+    finally {
+      setJoinInFlight(false);
+    }
+  }, [selectedUser, joinSessionId]);
+
+  useEffect(() => {
+    if (!pathCallSessionId || !autoJoinIntent?.demoUserId) return;
+    if (autoJoinTriggeredRef.current) return;
+
+    if (selectedUser?.id !== autoJoinIntent.demoUserId) {
+      setSelectedUserId(autoJoinIntent.demoUserId);
+      return;
+    }
+
+    if (!joinSessionId.trim()) {
+      setJoinSessionId(pathCallSessionId);
+      return;
+    }
+
+    autoJoinTriggeredRef.current = true;
+    void handleJoinCall();
+  }, [autoJoinIntent, handleJoinCall, joinSessionId, pathCallSessionId, selectedUser]);
 
   const handleAddParticipants = async () => {
     if (!callInfo || inviteSelection.length === 0) return;
@@ -240,18 +516,26 @@ function App() {
   const handleEndCall = async () => {
     if (!callInfo) return;
     callAdapter?.dispose();
+    setAdapterError(null);
     setView('summary');
-    await refreshTranscript();
+    await Promise.all([refreshTranscript(), refreshSummary()]);
   };
 
   const handleStartNewCall = () => {
     setCallInfo(null);
     setCallParticipants([]);
     setInviteSelection([]);
+    setAdapterError(null);
     setTranscriptSegments([]);
     setTranscriptError(null);
     setTranscriptLoading(false);
+    setCallSummary(null);
+    setSummaryError(null);
+    setSummaryLoading(false);
     setView('call');
+    setJoinSessionId(pathCallSessionId ?? '');
+    setJoinError(null);
+    setJoinInFlight(false);
   };
 
   return (
@@ -264,6 +548,10 @@ function App() {
           <SummaryView
             callInfo={callInfo}
             callParticipants={callParticipants}
+            callSummary={callSummary}
+            summaryLoading={summaryLoading}
+            summaryError={summaryError}
+            onRefreshSummary={() => refreshSummary()}
             onStartNewCall={handleStartNewCall}
             onBackToCall={() => setView('call')}
             transcriptSegments={transcriptSegments}
@@ -280,6 +568,7 @@ function App() {
             callInfo={callInfo}
             callAdapterReady={!!callAdapter}
             error={error}
+            adapterError={adapterError}
             startInFlight={startInFlight}
             callParticipants={callParticipants}
             inviteSelection={inviteSelection}
@@ -294,6 +583,11 @@ function App() {
             transcriptLoading={transcriptLoading}
             transcriptError={transcriptError}
             onRefreshTranscript={() => refreshTranscript()}
+            joinSessionId={joinSessionId}
+            onJoinSessionChange={setJoinSessionId}
+            onJoinCall={handleJoinCall}
+            joinInFlight={joinInFlight}
+            joinError={joinError}
           />
         )}
       </div>
@@ -350,6 +644,7 @@ type CallWorkspaceProps = {
   callAdapterReady: boolean;
   error: string | null;
   addError: string | null;
+  adapterError: string | null;
   startInFlight: boolean;
   addInFlight: boolean;
   onResetUser: () => void;
@@ -359,6 +654,11 @@ type CallWorkspaceProps = {
   transcriptSegments: TranscriptSegment[];
   transcriptLoading: boolean;
   transcriptError: string | null;
+  joinSessionId: string;
+  onJoinSessionChange: (value: string) => void;
+  onJoinCall: () => void;
+  joinInFlight: boolean;
+  joinError: string | null;
 };
 
 function CallWorkspace({
@@ -366,6 +666,11 @@ function CallWorkspace({
   preCallParticipantIds,
   onTogglePreCallParticipant,
   onStartCall,
+  onJoinCall,
+  onJoinSessionChange,
+  joinSessionId,
+  joinInFlight,
+  joinError,
   callInfo,
   callParticipants,
   inviteSelection,
@@ -374,6 +679,7 @@ function CallWorkspace({
   callAdapterReady,
   error,
   addError,
+  adapterError,
   startInFlight,
   addInFlight,
   onResetUser,
@@ -382,7 +688,7 @@ function CallWorkspace({
   transcriptSegments,
   transcriptLoading,
   transcriptError,
-  onRefreshTranscript
+  onRefreshTranscript,
 }: CallWorkspaceProps) {
   const otherUsers = DEMO_USERS.filter((user) => user.id !== selectedUser.id);
   const availableInvitees = otherUsers.filter(
@@ -483,7 +789,7 @@ function CallWorkspace({
                 type="button"
                 onClick={onEndCall}
               >
-                End call & open transcript
+                End call & view summary
               </button>
             </>
           ) : (
@@ -516,6 +822,29 @@ function CallWorkspace({
                 {startInFlight ? 'Starting...' : 'Start Call'}
               </button>
               {error ? <p className="mt-2 text-sm text-rose-300">{error}</p> : null}
+
+              <div className="mt-5 space-y-2 rounded-lg border border-slate-800/60 bg-slate-950/50 p-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-semibold text-slate-100">Join existing call</span>
+                  <span className="text-xs text-slate-400">Enter call session id</span>
+                </div>
+                <input
+                  className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400/80 focus:ring-1 focus:ring-cyan-500/50"
+                  placeholder="a4aaa355-8caf-4073-a931-270e296ed9be"
+                  value={joinSessionId}
+                  onChange={(e) => onJoinSessionChange(e.target.value)}
+                  spellCheck={false}
+                />
+                <button
+                  className="w-full rounded-lg border border-slate-700 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:border-cyan-400/80 hover:text-cyan-100 disabled:cursor-not-allowed disabled:opacity-70"
+                  type="button"
+                  onClick={onJoinCall}
+                  disabled={joinInFlight || !joinSessionId.trim()}
+                >
+                  {joinInFlight ? 'Joining...' : 'Join Call'}
+                </button>
+                {joinError ? <p className="text-sm text-rose-300">{joinError}</p> : null}
+              </div>
             </>
           )}
           {callInfo ? (
@@ -528,6 +857,12 @@ function CallWorkspace({
                 <div className="text-xs uppercase tracking-[0.08em] text-slate-500">Group ID</div>
                 <code>{callInfo.acsGroupId}</code>
               </div>
+              {callInfo.callConnectionId ? (
+                <div>
+                  <div className="text-xs uppercase tracking-[0.08em] text-slate-500">Call Connection</div>
+                  <code>{callInfo.callConnectionId}</code>
+                </div>
+              ) : null}
             </div>
           ) : null}
         </div>
@@ -544,6 +879,15 @@ function CallWorkspace({
                 scoped to {selectedUser.displayName}.
               </p>
             </div>
+          ) : adapterError && !callAdapter ? (
+            <div className="flex h-full flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-rose-500/50 bg-rose-950/30 p-6 text-center">
+              <p className="text-xs uppercase tracking-[0.1em] text-rose-300">Adapter error</p>
+              <h3 className="text-xl font-semibold text-rose-50">Call UI failed to load</h3>
+              <p className="max-w-xl text-sm text-rose-100">{adapterError}</p>
+              <p className="text-xs text-rose-200">
+                Try ending the call and starting again to refresh your ACS token.
+              </p>
+            </div>
           ) : callAdapterReady ? (
             <CallComposite adapter={callAdapter!} />
           ) : (
@@ -553,6 +897,12 @@ function CallWorkspace({
             </div>
           )}
         </div>
+        {adapterError && callInfo ? (
+          <div className="rounded-xl border border-rose-500/50 bg-rose-500/10 p-3 text-sm text-rose-50 shadow-lg shadow-rose-900/40">
+            <div className="font-semibold">ACS adapter reported an error</div>
+            <div className="text-rose-100">{adapterError}</div>
+          </div>
+        ) : null}
 
         {callInfo ? (
           <TranscriptPanel
@@ -576,6 +926,10 @@ type SummaryViewProps = {
   transcriptSegments: TranscriptSegment[];
   transcriptLoading: boolean;
   transcriptError: string | null;
+  callSummary: CallSummaryResponse | null;
+  summaryLoading: boolean;
+  summaryError: string | null;
+  onRefreshSummary: () => void;
   onRefreshTranscript: () => void;
   onStartNewCall: () => void;
   onBackToCall: () => void;
@@ -587,68 +941,232 @@ function SummaryView({
   transcriptSegments,
   transcriptLoading,
   transcriptError,
+  callSummary,
+  summaryLoading,
+  summaryError,
+  onRefreshSummary,
   onRefreshTranscript,
   onStartNewCall,
   onBackToCall
 }: SummaryViewProps) {
-  return (
-    <section className="grid gap-4 lg:grid-cols-[320px,1fr]">
-      <div className="flex flex-col gap-3">
-        <div className="rounded-xl border border-slate-800 bg-gradient-to-br from-slate-900/70 via-slate-900 to-slate-950 p-5 shadow-xl shadow-black/50">
-          <p className="text-xs uppercase tracking-[0.1em] text-cyan-300">Call summary</p>
-          <h3 className="mt-2 text-xl font-semibold text-slate-50">Transcript captured</h3>
-          <p className="mt-2 text-sm text-slate-300">
-            This view queries the Functions endpoint for transcript segments and renders them in
-            order. Use refresh to replay the latest ACS/Speech webhook events.
-          </p>
-          <div className="mt-3 space-y-2 text-sm text-slate-200">
-            <div>
-              <div className="text-xs uppercase tracking-[0.08em] text-slate-500">Call Session</div>
-              <code>{callInfo.callSessionId}</code>
-            </div>
-            <div>
-              <div className="text-xs uppercase tracking-[0.08em] text-slate-500">Group ID</div>
-              <code>{callInfo.acsGroupId}</code>
-            </div>
-            <div>
-              <div className="text-xs uppercase tracking-[0.08em] text-slate-500">Participants</div>
-              <ul className="mt-1 space-y-1 text-slate-200">
-                {callParticipants.map((participant) => (
-                  <li key={participant.id} className="flex items-center justify-between rounded-lg border border-slate-800/70 bg-slate-950/40 px-2 py-1">
-                    <span className="font-semibold">{participant.displayName}</span>
-                    <span className="text-xs text-slate-400">{participant.demoUserId}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          </div>
+  const participants = callSummary?.participants ?? callParticipants;
+  const statusLabel = callSummary?.status ?? 'Completed';
+  const summaryStatus = callSummary?.summaryStatus ?? 'pending';
+  const startedByName = callSummary?.startedByDemoUserId
+    ? participants.find((participant) => participant.demoUserId === callSummary.startedByDemoUserId)
+      ?.displayName ?? callSummary.startedByDemoUserId
+    : participants[0]?.displayName ?? 'Unknown';
+  const startedAt = formatDateTime(callSummary?.startedAtUtc);
+  const endedAt = formatDateTime(callSummary?.endedAtUtc);
+  const summaryGeneratedAt = callSummary?.summaryGeneratedAtUtc
+    ? formatDateTime(callSummary.summaryGeneratedAtUtc)
+    : null;
+  const summaryText =
+    callSummary?.summary && summaryStatus === 'ready'
+      ? callSummary.summary
+      : summaryError
+        ? 'Summary unavailable right now. Try refreshing.'
+        : 'Generating a concise recap from the transcript...';
+  const keyPoints = normalizeSummaryList(callSummary?.keyPoints);
+  const actionItems = normalizeSummaryList(callSummary?.actionItems);
+  const sessionId = callSummary?.callSessionId ?? callInfo.callSessionId;
+  const groupId = callSummary?.acsGroupId ?? callInfo.acsGroupId;
 
-          <div className="mt-4 flex flex-wrap gap-3">
-            <button
-              className="rounded-lg bg-gradient-to-r from-cyan-400 to-blue-400 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:brightness-110"
-              onClick={onStartNewCall}
-            >
-              Start new call
-            </button>
-            <button
-              className="rounded-lg border border-slate-700 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:border-cyan-400/80 hover:text-cyan-100"
-              onClick={onBackToCall}
-            >
-              Back to call view
-            </button>
+  return (
+    <section className="flex flex-col gap-4">
+      <div className="grid gap-4 lg:grid-cols-[340px,1fr]">
+        <div className="flex flex-col gap-3">
+          <div className="rounded-2xl border border-slate-800 bg-gradient-to-br from-slate-900/70 via-slate-900 to-slate-950 p-5 shadow-xl shadow-black/50">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs uppercase tracking-[0.1em] text-cyan-300">Call summary</p>
+                <h3 className="mt-2 text-xl font-semibold text-slate-50">Recap + actions</h3>
+                <p className="mt-2 text-sm text-slate-300">
+                  Pulled from /api/calls/{'{'}id{'}'}/summary. Refresh if ACS events are still landing.
+                </p>
+              </div>
+              <span
+                className={`rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.08em] ${summaryStatus === 'ready'
+                  ? 'bg-emerald-500/20 text-emerald-200'
+                  : 'bg-amber-400/20 text-amber-100'
+                  }`}
+              >
+                {summaryStatus === 'ready' ? 'Ready' : 'Pending'}
+              </span>
+            </div>
+
+            <div className="mt-4 space-y-2 text-sm text-slate-200">
+              <div className="flex items-center justify-between rounded-xl border border-slate-800/60 bg-slate-950/50 px-3 py-2">
+                <div className="text-xs uppercase tracking-[0.08em] text-slate-500">Status</div>
+                <span className="rounded-full bg-slate-800 px-3 py-1 text-xs font-semibold uppercase tracking-[0.08em] text-slate-100">
+                  {statusLabel}
+                </span>
+              </div>
+              <div className="flex items-center justify-between rounded-xl border border-slate-800/60 bg-slate-950/50 px-3 py-2">
+                <div className="text-xs uppercase tracking-[0.08em] text-slate-500">Started</div>
+                <span className="font-semibold text-slate-100">{startedAt}</span>
+              </div>
+              <div className="flex items-center justify-between rounded-xl border border-slate-800/60 bg-slate-950/50 px-3 py-2">
+                <div className="text-xs uppercase tracking-[0.08em] text-slate-500">Ended</div>
+                <span className="font-semibold text-slate-100">{endedAt}</span>
+              </div>
+              <div className="flex items-center justify-between rounded-xl border border-slate-800/60 bg-slate-950/50 px-3 py-2">
+                <div className="text-xs uppercase tracking-[0.08em] text-slate-500">Started by</div>
+                <span className="font-semibold text-slate-100">{startedByName}</span>
+              </div>
+              {summaryGeneratedAt ? (
+                <div className="flex items-center justify-between rounded-xl border border-slate-800/60 bg-slate-950/50 px-3 py-2">
+                  <div className="text-xs uppercase tracking-[0.08em] text-slate-500">Summary at</div>
+                  <span className="font-semibold text-slate-100">{summaryGeneratedAt}</span>
+                </div>
+              ) : null}
+
+              <div className="pt-2">
+                <div className="text-xs uppercase tracking-[0.08em] text-slate-500">Participants</div>
+                <ul className="mt-2 space-y-2">
+                  {participants.map((participant) => (
+                    <li
+                      key={participant.id}
+                      className="flex items-center justify-between rounded-lg border border-slate-800/70 bg-slate-950/50 px-3 py-2"
+                    >
+                      <div>
+                        <div className="font-semibold">{participant.displayName}</div>
+                        <div className="text-xs text-slate-500">{participant.demoUserId}</div>
+                      </div>
+                      <span className="rounded-full bg-slate-800 px-2 py-1 text-[11px] uppercase tracking-[0.08em] text-slate-300">
+                        {participant.demoUserId === callSummary?.startedByDemoUserId ? 'Host' : 'Participant'}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              <div className="grid grid-cols-1 gap-2 border-t border-slate-800/60 pt-3 text-xs uppercase tracking-[0.08em] text-slate-500">
+                <div>
+                  <div>Call Session</div>
+                  <code className="text-slate-300">{sessionId}</code>
+                </div>
+                <div>
+                  <div>Group ID</div>
+                  <code className="text-slate-300">{groupId}</code>
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-5 flex flex-wrap gap-3">
+              <button
+                className="rounded-lg bg-gradient-to-r from-cyan-400 to-blue-400 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:brightness-110"
+                onClick={onStartNewCall}
+              >
+                Start new call
+              </button>
+              <button
+                className="rounded-lg border border-slate-700 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:border-cyan-400/80 hover:text-cyan-100"
+                onClick={onBackToCall}
+              >
+                Back to call view
+              </button>
+            </div>
           </div>
         </div>
-      </div>
 
-      <TranscriptPanel
-        title="Call transcript"
-        subtitle="Ordered by ACS/Speech offsets; fetched via /api/calls/{id}/transcript"
-        segments={transcriptSegments}
-        loading={transcriptLoading}
-        error={transcriptError}
-        onRefresh={onRefreshTranscript}
-      />
+        <div className="flex flex-col gap-4">
+          <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4 shadow-xl shadow-black/50">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs uppercase tracking-[0.1em] text-cyan-300">High-level overview</p>
+                <p className="text-sm text-slate-400">
+                  Generated from the transcript using Azure OpenAI (or fallback heuristics).
+                </p>
+              </div>
+              <button
+                className="rounded-lg border border-slate-700 px-3 py-1 text-sm font-semibold text-slate-200 transition hover:border-cyan-400/80 hover:text-cyan-100 disabled:cursor-not-allowed disabled:opacity-60"
+                onClick={onRefreshSummary}
+                disabled={summaryLoading}
+              >
+                {summaryLoading ? 'Refreshing...' : 'Refresh summary'}
+              </button>
+            </div>
+            {summaryError ? <p className="mt-2 text-sm text-rose-300">{summaryError}</p> : null}
+            <p className="mt-3 whitespace-pre-line text-lg font-semibold text-slate-50">
+              {summaryText}
+            </p>
+            {callSummary?.summarySource ? (
+              <p className="mt-2 text-xs uppercase tracking-[0.08em] text-slate-500">
+                Source: {callSummary.summarySource}
+              </p>
+            ) : null}
+          </div>
+
+          <div className="grid gap-4 lg:grid-cols-2">
+            <BulletListCard
+              title="Key points"
+              items={keyPoints}
+              emptyText="Key points will appear after the summary finishes."
+            />
+            <BulletListCard
+              title="Action items"
+              items={actionItems}
+              emptyText="No action items returned. Add follow-ups manually."
+              accent="amber"
+            />
+          </div>
+
+          <TranscriptPanel
+            title="Call transcript"
+            subtitle="Ordered by ACS/Speech offsets; fetched via /api/calls/{id}/transcript"
+            segments={transcriptSegments}
+            loading={transcriptLoading}
+            error={transcriptError}
+            onRefresh={onRefreshTranscript}
+          />
+        </div>
+      </div>
     </section>
+  );
+}
+
+function BulletListCard({
+  title,
+  items,
+  emptyText,
+  accent
+}: {
+  title: string;
+  items: string[];
+  emptyText: string;
+  accent?: 'amber';
+}) {
+  const pillClass =
+    accent === 'amber'
+      ? 'bg-amber-300/20 text-amber-50 border-amber-400/50'
+      : 'bg-cyan-300/20 text-cyan-50 border-cyan-400/50';
+  const dotClass = accent === 'amber' ? 'bg-amber-300' : 'bg-cyan-300';
+  const countLabel = items.length ? `${items.length} items` : 'Pending';
+
+  return (
+    <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4 shadow-xl shadow-black/50">
+      <div className="flex items-center justify-between">
+        <p className="text-xs uppercase tracking-[0.1em] text-cyan-300">{title}</p>
+        <span
+          className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.08em] ${pillClass}`}
+        >
+          {countLabel}
+        </span>
+      </div>
+      <ul className="mt-3 space-y-2 text-sm text-slate-100">
+        {items.length === 0 ? (
+          <li className="text-slate-400">{emptyText}</li>
+        ) : (
+          items.map((item, idx) => (
+            <li key={`${title}-${idx}`} className="flex gap-2">
+              <span className={`mt-2 h-2 w-2 rounded-full ${dotClass}`} />
+              <span>{item}</span>
+            </li>
+          ))
+        )}
+      </ul>
+    </div>
   );
 }
 
@@ -729,18 +1247,18 @@ function Header() {
     <header className="rounded-2xl border border-slate-800 bg-gradient-to-br from-slate-900/80 via-slate-900 to-slate-950 p-6 shadow-xl shadow-black/50">
       <div className="flex flex-wrap items-center gap-3 text-sm text-slate-300">
         <span className="rounded-full bg-slate-800 px-3 py-1 text-xs uppercase tracking-[0.1em]">
-          Phase 3
+          Phase 4
         </span>
         <span className="rounded-full bg-cyan-400/20 px-3 py-1 text-xs uppercase tracking-[0.1em] text-cyan-200">
-          ACS webhook + transcript pipeline
+          Summaries + action items
         </span>
       </div>
       <h1 className="mt-4 text-4xl font-bold leading-tight sm:text-5xl">
-        Call studio with <span className="text-cyan-300">live transcripts</span> from Functions
+        Call studio with <span className="text-cyan-300">AI summaries</span> and live transcripts
       </h1>
       <p className="mt-3 max-w-3xl text-lg text-slate-300">
-        Start a call, receive ACS events in the Functions backend, and watch transcript segments flow
-        into the UI. Jump to the summary view to replay the captured conversation.
+        Start a call, let ACS events feed transcript segments into the backend, then review an
+        Azure OpenAI-generated overview with key points, action items, and the full transcript.
       </p>
     </header>
   );
@@ -751,17 +1269,16 @@ function transformCallStart(
   selectedUser: DemoUser,
   fallbackAcsIdentity: string
 ): CallBootstrapState {
+  const acsIdentity = payload.acsIdentity ?? fallbackAcsIdentity;
   return {
     callSessionId: payload.callSessionId,
     acsGroupId: payload.acsGroupId,
+    callConnectionId: payload.callConnectionId,
     acsToken: payload.acsToken,
-    acsIdentity: payload.acsIdentity ?? fallbackAcsIdentity,
+    acsIdentity,
+    acsTokenExpiresOn: payload.acsTokenExpiresOn,
     displayName: selectedUser.displayName,
-    participants: normalizeParticipants(
-      payload.participants,
-      selectedUser,
-      payload.acsIdentity ?? fallbackAcsIdentity
-    )
+    participants: normalizeParticipants(payload.participants, selectedUser, acsIdentity)
   };
 }
 
@@ -787,6 +1304,22 @@ function normalizeParticipants(
       acsIdentity: selectedUserAcsIdentity
     }
   ];
+}
+
+function normalizeSummaryList(list?: string[] | null) {
+  if (!list) return [];
+  return list
+    .map((item) => (item ?? '').trim())
+    .filter((item) => item.length > 0);
+}
+
+function formatDateTime(value?: string | null) {
+  if (!value) return '—';
+  const date = new Date(value);
+  return `${date.toLocaleDateString()} ${date.toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit'
+  })}`;
 }
 
 function formatClock(dateString: string) {

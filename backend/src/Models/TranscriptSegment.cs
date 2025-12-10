@@ -10,4 +10,8 @@ public record TranscriptSegment(
     double? OffsetSeconds,
     double? DurationSeconds,
     DateTimeOffset CreatedAtUtc,
-    string? Source = null);
+    string? Source = null,
+    double? Confidence = null,
+    string? Sentiment = null,
+    string? Language = null,
+    string? ResultStatus = null);

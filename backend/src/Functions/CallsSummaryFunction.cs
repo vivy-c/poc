@@ -6,25 +6,25 @@ using Microsoft.Azure.Functions.Worker.Http;
 
 namespace CallTranscription.Functions.Functions;
 
-public class CallsTranscriptFunction
+public class CallsSummaryFunction
 {
     private readonly CallSessionStore _callSessionStore;
-    private readonly TranscriptStore _transcriptStore;
+    private readonly CallSummaryService _callSummaryService;
     private readonly ResponseFactory _responseFactory;
 
-    public CallsTranscriptFunction(
+    public CallsSummaryFunction(
         CallSessionStore callSessionStore,
-        TranscriptStore transcriptStore,
+        CallSummaryService callSummaryService,
         ResponseFactory responseFactory)
     {
         _callSessionStore = callSessionStore;
-        _transcriptStore = transcriptStore;
+        _callSummaryService = callSummaryService;
         _responseFactory = responseFactory;
     }
 
-    [Function("calls-get-transcript")]
+    [Function("calls-get-summary")]
     public async Task<HttpResponseData> RunAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "get", "options", Route = "calls/{callSessionId:guid}/transcript")] HttpRequestData req,
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", "options", Route = "calls/{callSessionId:guid}/summary")] HttpRequestData req,
         string callSessionId)
     {
         if (string.Equals(req.Method, "OPTIONS", StringComparison.OrdinalIgnoreCase))
@@ -57,7 +57,10 @@ public class CallsTranscriptFunction
             return notFound;
         }
 
-        var segments = _transcriptStore.GetByCallSession(callSessionGuid);
+        var summary = await _callSummaryService.EnsureSummaryAsync(
+            callSessionGuid,
+            req.FunctionContext.CancellationToken);
+
         var payload = new
         {
             callSessionId = session.Id,
@@ -75,19 +78,12 @@ public class CallsTranscriptFunction
                 p.DisplayName,
                 p.AcsIdentity
             }),
-            segments = segments.Select(s => new
-            {
-                s.Id,
-                s.CallSessionId,
-                s.SpeakerDemoUserId,
-                s.SpeakerAcsIdentity,
-                s.SpeakerDisplayName,
-                s.Text,
-                s.OffsetSeconds,
-                s.DurationSeconds,
-                s.CreatedAtUtc,
-                s.Source
-            })
+            summaryStatus = summary is null ? "pending" : "ready",
+            summary = summary?.Summary,
+            keyPoints = summary?.KeyPoints ?? Array.Empty<string>(),
+            actionItems = summary?.ActionItems ?? Array.Empty<string>(),
+            summaryGeneratedAtUtc = summary?.GeneratedAtUtc,
+            summarySource = summary?.Source
         };
 
         var ok = _responseFactory.CreateJson(req, HttpStatusCode.OK, payload);

@@ -19,9 +19,18 @@ var host = new HostBuilder()
         services.AddSingleton<DemoUserStore>();
         services.AddSingleton<CallSessionStore>();
         services.AddSingleton<TranscriptStore>();
+        services.AddSingleton<CallSummaryStore>();
         services.AddSingleton<AcsIdentityService>();
         services.AddSingleton<AcsCallService>();
+        services.AddSingleton<AcsTranscriptionService>();
         services.Configure<AcsOptions>(context.Configuration.GetSection("ACS"));
+        services.AddSingleton<CallSummaryService>();
+        services.Configure<OpenAiOptions>(context.Configuration.GetSection("OpenAI"));
+        services.Configure<SpeechOptions>(context.Configuration.GetSection("Speech"));
+        services.Configure<WebhookAuthOptions>(context.Configuration.GetSection("Webhook"));
+        services.Configure<FeatureFlagsOptions>(context.Configuration.GetSection("Features"));
+        services.AddSingleton<WebSocketTranscriptionService>();
+        services.AddHostedService(sp => sp.GetRequiredService<WebSocketTranscriptionService>());
     })
     .Build();
 
