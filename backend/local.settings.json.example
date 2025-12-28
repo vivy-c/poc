@@ -1,0 +1,14 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
+    "ACS__ConnectionString": "<acs-connection-string>",
+    "Speech__Key": "<speech-key>",
+    "Speech__Region": "<speech-region>",
+    "OpenAI__Endpoint": "<openai-endpoint>",
+    "OpenAI__Key": "<openai-key>",
+    "OpenAI__DeploymentName": "<openai-deployment>",
+    "Storage__ConnectionString": "<storage-connection>"
+  }
+}

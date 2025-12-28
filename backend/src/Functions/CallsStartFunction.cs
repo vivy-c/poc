@@ -1,0 +1,136 @@
+using System.Net;
+using System.Text.Json;
+using CallTranscription.Functions.Common;
+using CallTranscription.Functions.Models;
+using CallTranscription.Functions.Services;
+using Microsoft.Azure.Functions.Worker;
+using Microsoft.Azure.Functions.Worker.Http;
+using Microsoft.Extensions.Logging;
+
+namespace CallTranscription.Functions.Functions;
+
+public class CallsStartFunction
+{
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
+    private readonly DemoUserStore _demoUserStore;
+    private readonly CallSessionStore _callSessionStore;
+    private readonly AcsIdentityService _acsIdentityService;
+    private readonly ResponseFactory _responseFactory;
+    private readonly ILogger _logger;
+
+    public CallsStartFunction(
+        DemoUserStore demoUserStore,
+        CallSessionStore callSessionStore,
+        AcsIdentityService acsIdentityService,
+        ResponseFactory responseFactory,
+        ILoggerFactory loggerFactory)
+    {
+        _demoUserStore = demoUserStore;
+        _callSessionStore = callSessionStore;
+        _acsIdentityService = acsIdentityService;
+        _responseFactory = responseFactory;
+        _logger = loggerFactory.CreateLogger<CallsStartFunction>();
+    }
+
+    [Function("calls-start")]
+    public async Task<HttpResponseData> RunAsync(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "calls/start")] HttpRequestData req)
+    {
+        var request = await JsonSerializer.DeserializeAsync<StartCallRequest>(req.Body, JsonOptions);
+        if (request is null || string.IsNullOrWhiteSpace(request.DemoUserId))
+        {
+            return _responseFactory.CreateJson(
+                req,
+                HttpStatusCode.BadRequest,
+                new { error = "demoUserId is required." });
+        }
+
+        var initiator = _demoUserStore.GetById(request.DemoUserId);
+        if (initiator is null)
+        {
+            return _responseFactory.CreateJson(
+                req,
+                HttpStatusCode.NotFound,
+                new { error = $"Unknown demo user '{request.DemoUserId}'." });
+        }
+
+        var participantIds = request.ParticipantIds?.Distinct(StringComparer.OrdinalIgnoreCase).Where(id => id != initiator.Id).ToList()
+            ?? new List<string>();
+
+        var participants = new List<CallParticipant>();
+        string acsIdentity;
+
+        try
+        {
+            acsIdentity = await _acsIdentityService.EnsureIdentityAsync(initiator, req.FunctionContext.CancellationToken);
+            _demoUserStore.AssignAcsIdentity(initiator.Id, acsIdentity);
+
+            participants.Add(new CallParticipant(Guid.NewGuid(), initiator.Id, initiator.DisplayName, acsIdentity));
+
+            foreach (var participantId in participantIds)
+            {
+                var participantUser = _demoUserStore.GetById(participantId);
+                if (participantUser is null)
+                {
+                    _logger.LogWarning("Requested participant {ParticipantId} not found", participantId);
+                    continue;
+                }
+
+                var participantIdentity = await _acsIdentityService.EnsureIdentityAsync(participantUser, req.FunctionContext.CancellationToken);
+                _demoUserStore.AssignAcsIdentity(participantUser.Id, participantIdentity);
+
+                participants.Add(new CallParticipant(Guid.NewGuid(), participantUser.Id, participantUser.DisplayName, participantIdentity));
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to provision ACS identity for call start by {DemoUserId}", request.DemoUserId);
+            return _responseFactory.CreateJson(
+                req,
+                HttpStatusCode.InternalServerError,
+                new { error = "Unable to start call (identity provisioning failed)." });
+        }
+
+        string acsToken;
+        DateTimeOffset tokenExpiresOn;
+
+        try
+        {
+            var tokenResult = await _acsIdentityService.IssueVoipTokenAsync(acsIdentity, req.FunctionContext.CancellationToken);
+            acsToken = tokenResult.Token;
+            tokenExpiresOn = tokenResult.ExpiresOn;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to issue ACS token for {DemoUserId}", request.DemoUserId);
+            return _responseFactory.CreateJson(
+                req,
+                HttpStatusCode.InternalServerError,
+                new { error = "Unable to issue ACS token." });
+        }
+
+        var acsGroupId = Guid.NewGuid().ToString();
+        var callSession = _callSessionStore.Create(initiator.Id, acsGroupId, participants);
+
+        var payload = new
+        {
+            callSessionId = callSession.Id,
+            acsGroupId,
+            acsToken,
+            acsTokenExpiresOn = tokenExpiresOn,
+            acsIdentity,
+            participants = callSession.Participants.Select(p => new
+            {
+                p.Id,
+                p.DemoUserId,
+                p.DisplayName,
+                p.AcsIdentity
+            })
+        };
+
+        return _responseFactory.CreateJson(req, HttpStatusCode.OK, payload);
+    }
+
+    private sealed record StartCallRequest(string DemoUserId, IEnumerable<string>? ParticipantIds);
+}
